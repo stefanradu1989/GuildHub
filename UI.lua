@@ -1,12 +1,32 @@
 local _, GH = ...
 
-local ROW_H, MAX_ROWS = 22, 12
-local frame, rows, tab = nil, {}, "events"
+local FRAME_W, FRAME_H = 1120, 720
+local ROW_H = 22
+local ROWS_TOP = 146 -- distance from the top of the window to the first row
+local MAX_ROWS = math.floor((FRAME_H - ROWS_TOP - 30) / ROW_H) -- room below the page header, above the hint line
+local frame, rows = nil, {}
 
 local PARCHMENT_ATLAS = "QuestBG-Parchment"
 local PARCHMENT = "Interface\\QuestFrame\\QuestBG" -- fallback if the atlas is missing
 local PARCHMENT_COORDS = { 0, 1, 0, 1 }
 local TEXT = { 0.2, 0.1, 0.0 } -- dark brown, readable on parchment
+
+-- Spellbook-style layout: tabs along the top pick a page, the page has a title, and a page can have sections.
+local PAGES = {
+    { key = "events", label = "Events", title = "Guild Events" },
+    { key = "crafting", label = "Crafting", title = "Crafting Orders",
+      sections = {
+          { key = "requests", label = "Requests" },
+          { key = "fulfill", label = "Fulfill Requests" },
+          { key = "crafters", label = "Crafters" },
+      } },
+}
+local page, section = "events", "requests"
+
+-- The list currently shown: "events", "requests", "fulfill" or "crafters".
+local function currentView()
+    return page == "events" and "events" or section
+end
 
 StaticPopupDialogs["GUILDHUB_NEW"] = {
     text = "%s",
@@ -32,9 +52,7 @@ local function ask(prompt, cb)
     StaticPopup_Show("GUILDHUB_NEW", prompt, nil, cb)
 end
 
-local function sorted(tbl)
-    local list = {}
-    for _, v in pairs(tbl) do list[#list + 1] = v end
+local function sorted(list)
     table.sort(list, function(a, b) return (a.ts or 0) > (b.ts or 0) end)
     return list
 end
@@ -53,40 +71,85 @@ local function eventText(ev)
 end
 
 local function requestText(rq)
-    local status = rq.done and "|cff555555done|r" or
-        (rq.claimedBy and ("|cff8a6d00claimed by " .. rq.claimedBy .. "|r") or "|cff1a7a1aopen|r")
-    return string.format("%s - for %s [%s]", rq.item, rq.requester, status)
+    local status
+    if rq.done then status = "|cff555555done|r"
+    elseif rq.claimedBy == GH.me then status = "|cff8a6d00claimed by you|r"
+    elseif rq.claimedBy then status = "|cff8a6d00claimed by " .. rq.claimedBy .. "|r"
+    else status = "|cff1a7a1aopen|r" end
+    return string.format("%s - for %s [%s]", rq.item, rq.requester == GH.me and "you" or rq.requester, status)
 end
 
 local function crafterText(r)
     return string.format("%s |cff555555(%s)|r - %s", r.recipe, r.prof, table.concat(r.crafters, ", "))
 end
 
+-- Items for the list currently shown.
+local function viewItems(view)
+    local list = {}
+    if view == "events" then
+        for _, ev in pairs(GH.db.events) do list[#list + 1] = ev end
+        return sorted(list)
+    elseif view == "requests" then -- requests I posted
+        for _, rq in pairs(GH.db.requests) do
+            if rq.requester == GH.me then list[#list + 1] = rq end
+        end
+        return sorted(list)
+    elseif view == "fulfill" then -- other people's requests I could take, plus the ones I already took
+        for _, rq in pairs(GH.db.requests) do
+            if rq.requester ~= GH.me and not rq.done and (not rq.claimedBy or rq.claimedBy == GH.me) then
+                list[#list + 1] = rq
+            end
+        end
+        return sorted(list)
+    end
+    return GH:FindCrafters(frame.search:GetText())
+end
+
+local EMPTY = {
+    events = "No events yet. Click New Event to create one.",
+    requests = "You haven't posted any requests. Click New Request, or pick a recipe under Crafters.",
+    fulfill = "No open requests from your guildmates right now.",
+    crafters = "No matching recipes. Open your profession windows to share yours.",
+}
+
+local HINTS = {
+    events = "Click: sign up   Right-click: edit slots   Shift-click: delete (host only)",
+    requests = "Right-click: mark as received   Shift-click: delete",
+    fulfill = "Click: take a request   Right-click: mark as crafted   Shift-click: give back a request you took",
+    crafters = "Type to search recipes. Click a recipe to post a craft request for it.",
+}
+
 function GH:RefreshUI()
     if not frame or not frame:IsShown() then return end
-    local list
-    if tab == "crafters" then
-        list = GH:FindCrafters(frame.search:GetText())
-    else
-        list = sorted(tab == "events" and GH.db.events or GH.db.requests)
+    local view = currentView()
+    local def
+    for _, p in ipairs(PAGES) do if p.key == page then def = p end end
+
+    frame.pageTitle:SetText(def.title)
+    for _, b in ipairs(frame.pageButtons) do b:SetEnabled(b.key ~= page) end
+    for _, b in ipairs(frame.sectionButtons) do
+        b:SetShown(def.sections ~= nil)
+        b:SetEnabled(b.key ~= section)
     end
-    frame.search:SetShown(tab == "crafters")
-    frame.newBtn:SetShown(tab ~= "crafters")
+    frame.search:SetShown(view == "crafters")
+    frame.newBtn:SetShown(view == "events" or view == "requests")
+    frame.newBtn:SetText(view == "events" and "New Event" or "New Request")
+
+    local list = viewItems(view)
     for i = 1, MAX_ROWS do
         local row, item = rows[i], list[i]
         if item then
             row.id, row.recipe = item.id, item.recipe
-            row.text:SetText(tab == "events" and eventText(item)
-                or tab == "requests" and requestText(item) or crafterText(item))
+            row.text:SetText(view == "events" and eventText(item)
+                or view == "crafters" and crafterText(item) or requestText(item))
             row:Show()
         else
             row:Hide()
         end
     end
-    frame.hint:SetText(tab == "events" and "Click: sign up   Right-click: edit slots   Shift-click: delete (host only)"
-        or tab == "requests" and "Click: claim   Right-click: mark done   Shift-click: delete (requester only)"
-        or "Type to search recipes. Click a recipe to post a craft request for it. Open your profession windows to share yours.")
-    frame.newBtn:SetText(tab == "events" and "New Event" or "New Request")
+    frame.empty:SetText(EMPTY[view])
+    frame.empty:SetShown(#list == 0)
+    frame.hint:SetText(HINTS[view])
 end
 
 local menu
@@ -146,10 +209,11 @@ local function showRoleMenu(id)
 end
 
 local function onRowClick(self, button)
-    if tab == "crafters" then
+    local view = currentView()
+    if view == "crafters" then
         GH:CreateRequest(self.recipe)
         GH:Print("Posted a request for " .. self.recipe)
-    elseif tab == "events" then
+    elseif view == "events" then
         if IsShiftKeyDown() then GH:DeleteEvent(self.id)
         elseif button == "RightButton" then
             local id = self.id
@@ -157,15 +221,18 @@ local function onRowClick(self, button)
                 GH:EditCaps(id, GH:ParseCaps(caps))
             end)
         else showRoleMenu(self.id) end
-    else
+    elseif view == "requests" then
         if IsShiftKeyDown() then GH:DeleteRequest(self.id)
+        elseif button == "RightButton" then GH:CompleteRequest(self.id) end
+    else -- fulfill
+        if IsShiftKeyDown() then GH:UnclaimRequest(self.id)
         elseif button == "RightButton" then GH:CompleteRequest(self.id)
         else GH:ClaimRequest(self.id) end
     end
 end
 
 local function newClicked()
-    if tab == "events" then
+    if currentView() == "events" then
         ask("Event title:", function(title)
             if title == "" then return end
             ask("When (your local time)? e.g. sat 20:00, tomorrow 20:00 or 2026-11-04 20:00", function(when)
@@ -181,14 +248,19 @@ local function newClicked()
     end
 end
 
-local function setTab(name)
-    tab = name
-    GH:RefreshUI()
+local function newButton(parent, label, width, key, onClick)
+    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    b:SetSize(width, 22)
+    b:SetText(label)
+    b.key = key
+    b:SetScript("OnClick", onClick)
+    return b
 end
 
 function GH:InitUI()
     frame = CreateFrame("Frame", "GuildHubFrame", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(560, 360)
+    frame:SetSize(FRAME_W, FRAME_H)
+    frame:SetClampedToScreen(true)
     frame:SetPoint("CENTER")
     frame:SetMovable(true)
     frame:EnableMouse(true)
@@ -199,7 +271,7 @@ function GH:InitUI()
     frame:Hide()
     tinsert(UISpecialFrames, "GuildHubFrame")
 
-    -- Quest-log parchment behind the list. Adjust PARCHMENT / PARCHMENT_COORDS if it looks off on your client.
+    -- Quest-log parchment for the "page". Adjust PARCHMENT / PARCHMENT_COORDS if it looks off on your client.
     local bg = frame:CreateTexture(nil, "BACKGROUND", nil, 2)
     if C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(PARCHMENT_ATLAS) then
         bg:SetAtlas(PARCHMENT_ATLAS) -- the same atlas the quest window uses
@@ -214,34 +286,56 @@ function GH:InitUI()
     frame.title:SetPoint("TOP", 0, -5)
     frame.title:SetText("Guild Hub")
 
-    local evBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    evBtn:SetSize(90, 22); evBtn:SetPoint("TOPLEFT", 12, -32); evBtn:SetText("Events")
-    evBtn:SetScript("OnClick", function() setTab("events") end)
+    -- Page tabs along the top, like the spellbook's.
+    frame.pageButtons = {}
+    for i, p in ipairs(PAGES) do
+        local b = newButton(frame, p.label, 110, p.key, function()
+            page = p.key
+            GH:RefreshUI()
+        end)
+        if i == 1 then b:SetPoint("TOPLEFT", 12, -32) else b:SetPoint("LEFT", frame.pageButtons[i - 1], "RIGHT", 4, 0) end
+        frame.pageButtons[i] = b
+    end
 
-    local rqBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    rqBtn:SetSize(90, 22); rqBtn:SetPoint("LEFT", evBtn, "RIGHT", 4, 0); rqBtn:SetText("Requests")
-    rqBtn:SetScript("OnClick", function() setTab("requests") end)
+    -- Page title with a divider underneath, like the heading on a spellbook page.
+    frame.pageTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+    frame.pageTitle:SetPoint("TOP", 0, -72)
+    frame.pageTitle:SetTextColor(unpack(TEXT))
+    local divider = frame:CreateTexture(nil, "ARTWORK")
+    divider:SetColorTexture(0.35, 0.2, 0.05, 0.6)
+    divider:SetHeight(2)
+    divider:SetPoint("TOPLEFT", 24, -102)
+    divider:SetPoint("TOPRIGHT", -24, -102)
 
-    local crBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    crBtn:SetSize(90, 22); crBtn:SetPoint("LEFT", rqBtn, "RIGHT", 4, 0); crBtn:SetText("Crafters")
-    crBtn:SetScript("OnClick", function() setTab("crafters") end)
+    -- Sections inside a page (only the Crafting page has them).
+    frame.sectionButtons = {}
+    for _, p in ipairs(PAGES) do
+        for _, s in ipairs(p.sections or {}) do
+            local b = newButton(frame, s.label, 130, s.key, function()
+                section = s.key
+                GH:RefreshUI()
+            end)
+            local prev = frame.sectionButtons[#frame.sectionButtons]
+            if prev then b:SetPoint("LEFT", prev, "RIGHT", 4, 0) else b:SetPoint("TOPLEFT", 24, -110) end
+            frame.sectionButtons[#frame.sectionButtons + 1] = b
+        end
+    end
 
     frame.search = CreateFrame("EditBox", nil, frame, "InputBoxTemplate")
-    frame.search:SetSize(150, 20)
-    frame.search:SetPoint("TOPRIGHT", -20, -33)
+    frame.search:SetSize(180, 20)
+    frame.search:SetPoint("TOPRIGHT", -30, -111)
     frame.search:SetAutoFocus(false)
     frame.search:SetScript("OnTextChanged", function() GH:RefreshUI() end)
     frame.search:SetScript("OnEscapePressed", frame.search.ClearFocus)
     frame.search:Hide()
 
-    frame.newBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.newBtn:SetSize(110, 22); frame.newBtn:SetPoint("TOPRIGHT", -12, -32)
-    frame.newBtn:SetScript("OnClick", newClicked)
+    frame.newBtn = newButton(frame, "New", 120, nil, newClicked)
+    frame.newBtn:SetPoint("TOPRIGHT", -24, -110)
 
     for i = 1, MAX_ROWS do
         local row = CreateFrame("Button", nil, frame)
-        row:SetSize(530, ROW_H)
-        row:SetPoint("TOPLEFT", 14, -62 - (i - 1) * ROW_H)
+        row:SetSize(FRAME_W - 60, ROW_H)
+        row:SetPoint("TOPLEFT", 24, -ROWS_TOP - (i - 1) * ROW_H)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
         row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
@@ -250,7 +344,7 @@ function GH:InitUI()
         row.text:SetTextColor(unpack(TEXT))
         row:SetScript("OnClick", onRowClick)
         row:SetScript("OnEnter", function(self)
-            local ev = tab == "events" and self.id and GH.db.events[self.id]
+            local ev = currentView() == "events" and self.id and GH.db.events[self.id]
             if not ev then return end
             local roster = GH:RosterByRole(ev)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -269,6 +363,10 @@ function GH:InitUI()
         row:SetScript("OnLeave", GameTooltip_Hide)
         rows[i] = row
     end
+
+    frame.empty = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.empty:SetPoint("TOP", 0, -ROWS_TOP - 40)
+    frame.empty:SetTextColor(0.4, 0.3, 0.2)
 
     frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     frame.hint:SetPoint("BOTTOM", 0, 10)
