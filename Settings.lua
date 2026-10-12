@@ -115,7 +115,9 @@ local button
 local function placeButton()
     local angle = math.rad(GH.db.settings.minimap.angle or 215)
     button:ClearAllPoints()
-    button:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * 80, math.sin(angle) * 80)
+    -- on the minimap's edge, whatever its size (a fixed radius ends up inside a larger minimap)
+    local radius = Minimap:GetWidth() / 2 + 5
+    button:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
 end
 
 function GH:UpdateMinimapButton()
