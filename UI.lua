@@ -1,8 +1,9 @@
 local _, GH = ...
 
-local FRAME_W, FRAME_H = 1120, 720
+local BANNER = 36 -- height of the guild-name banner under the window title; everything below is shifted down by it
+local FRAME_W, FRAME_H = 1120, 720 + BANNER
 local ROW_H = 22
-local ROWS_TOP = 146 -- distance from the top of the window to the first row
+local ROWS_TOP = 146 + BANNER -- distance from the top of the window to the first row
 local MAX_ROWS = math.floor((FRAME_H - ROWS_TOP - 30) / ROW_H) -- room below the page header, above the hint line
 local frame, rows = nil, {}
 
@@ -83,7 +84,12 @@ local function eventText(ev)
     end
     local counts = table.concat(parts, " ")
     local mine = GH:RoleOf(ev, GH.me)
-    local mark = mine and ("|cff1a7a1a[" .. mine .. "]|r ") or ""
+    local mark = ""
+    if mine then
+        for _, r in ipairs(GH.ROLES) do
+            if r.key == mine then mark = string.format("|c%s[%s]|r ", r.color, r.label) end
+        end
+    end
     return string.format("%s%s - %s (host %s)  T/H/D %s", mark, ev.title, GH:WhenText(ev), ev.host, counts)
 end
 
@@ -195,6 +201,7 @@ function GH:RefreshUI()
     local def
     for _, p in ipairs(PAGES) do if p.key == page then def = p end end
 
+    frame.banner:SetText((IsInGuild() and GetGuildInfo("player")) or "Guild Hub")
     frame.pageTitle:SetText(def.title)
     for _, b in ipairs(frame.pageButtons) do b:SetEnabled(b.key ~= page) end
     for _, b in ipairs(frame.sectionButtons) do
@@ -413,12 +420,21 @@ function GH:InitUI()
         bg:SetTexture(PARCHMENT)
         bg:SetTexCoord(unpack(PARCHMENT_COORDS))
     end
-    bg:SetPoint("TOPLEFT", 6, -58)
+    bg:SetPoint("TOPLEFT", 6, -58 - BANNER)
     bg:SetPoint("BOTTOMRIGHT", -6, 6)
 
     frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.title:SetPoint("TOP", 0, -5)
     frame.title:SetText("Guild Hub")
+
+    -- Big banner under the window title: the guild's name (set in RefreshUI).
+    local fontFile = GameFontNormalHuge:GetFont()
+    frame.banner = frame:CreateFontString(nil, "OVERLAY")
+    frame.banner:SetFont(fontFile, 30, "OUTLINE")
+    frame.banner:SetPoint("TOP", 0, -28)
+    frame.banner:SetTextColor(1, 0.82, 0)
+    frame:RegisterEvent("PLAYER_GUILD_UPDATE") -- the guild name isn't available right at login
+    frame:SetScript("OnEvent", function() GH:RefreshUI() end)
 
     -- Page tabs along the top, like the spellbook's.
     frame.pageButtons = {}
@@ -427,19 +443,19 @@ function GH:InitUI()
             page = p.key
             GH:RefreshUI()
         end)
-        if i == 1 then b:SetPoint("TOPLEFT", 12, -32) else b:SetPoint("LEFT", frame.pageButtons[i - 1], "RIGHT", 4, 0) end
+        if i == 1 then b:SetPoint("TOPLEFT", 12, -32 - BANNER) else b:SetPoint("LEFT", frame.pageButtons[i - 1], "RIGHT", 4, 0) end
         frame.pageButtons[i] = b
     end
 
     -- Page title with a divider underneath, like the heading on a spellbook page.
     frame.pageTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
-    frame.pageTitle:SetPoint("TOP", 0, -72)
+    frame.pageTitle:SetPoint("TOP", 0, -72 - BANNER)
     frame.pageTitle:SetTextColor(unpack(TEXT))
     local divider = frame:CreateTexture(nil, "ARTWORK")
     divider:SetColorTexture(0.35, 0.2, 0.05, 0.6)
     divider:SetHeight(2)
-    divider:SetPoint("TOPLEFT", 24, -102)
-    divider:SetPoint("TOPRIGHT", -24, -102)
+    divider:SetPoint("TOPLEFT", 24, -102 - BANNER)
+    divider:SetPoint("TOPRIGHT", -24, -102 - BANNER)
 
     -- Sections inside a page (only the Crafting page has them).
     frame.sectionButtons = {}
@@ -451,14 +467,14 @@ function GH:InitUI()
                 GH:RefreshUI()
             end)
             local prev = frame.sectionButtons[#frame.sectionButtons]
-            if prev then b:SetPoint("LEFT", prev, "RIGHT", 4, 0) else b:SetPoint("TOPLEFT", 24, -110) end
+            if prev then b:SetPoint("LEFT", prev, "RIGHT", 4, 0) else b:SetPoint("TOPLEFT", 24, -110 - BANNER) end
             frame.sectionButtons[#frame.sectionButtons + 1] = b
         end
     end
 
     frame.search = CreateFrame("EditBox", nil, frame, "InputBoxTemplate")
     frame.search:SetSize(180, 20)
-    frame.search:SetPoint("TOPRIGHT", -30, -111)
+    frame.search:SetPoint("TOPRIGHT", -30, -111 - BANNER)
     frame.search:SetAutoFocus(false)
     frame.search:SetScript("OnTextChanged", function() GH:RefreshUI() end)
     frame.search:SetScript("OnEscapePressed", frame.search.ClearFocus)
@@ -470,10 +486,10 @@ function GH:InitUI()
         frame.search:SetText("")
         GH:RefreshUI()
     end)
-    frame.backBtn:SetPoint("TOPRIGHT", -220, -110)
+    frame.backBtn:SetPoint("TOPRIGHT", -220, -110 - BANNER)
     frame.backBtn:Hide()
     frame.crumb = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    frame.crumb:SetPoint("TOPLEFT", 460, -114)
+    frame.crumb:SetPoint("TOPLEFT", 460, -114 - BANNER)
     frame.crumb:SetTextColor(unpack(TEXT))
 
     frame:EnableMouseWheel(true)
@@ -483,7 +499,7 @@ function GH:InitUI()
     end)
 
     frame.newBtn = newButton(frame, "New", 120, nil, newClicked)
-    frame.newBtn:SetPoint("TOPRIGHT", -24, -110)
+    frame.newBtn:SetPoint("TOPRIGHT", -24, -110 - BANNER)
 
     for i = 1, MAX_ROWS do
         local row = CreateFrame("Button", nil, frame)
