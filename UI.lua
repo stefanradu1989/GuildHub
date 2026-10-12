@@ -22,6 +22,9 @@ local PAGES = {
       } },
 }
 local page, section = "events", "requests"
+local crafterPlayer, crafterProf -- drill-down position in the Crafters section
+local offset, lastKey = 0, nil   -- list scroll position, reset whenever the list changes
+local actionsFor                 -- defined below; RefreshUI needs it first
 
 -- The list currently shown: "events", "requests", "fulfill" or "crafters".
 local function currentView()
@@ -37,15 +40,29 @@ StaticPopupDialogs["GUILDHUB_NEW"] = {
     timeout = 0,
     whileDead = true,
     hideOnEscape = true,
+    -- The callback runs on the next frame: if it opens another prompt (as creating an event does),
+    -- that prompt would otherwise be closed right after this handler returns.
     EditBoxOnEnterPressed = function(self)
         local p = self:GetParent()
-        p.data(self:GetText())
+        local cb, text = p.data, self:GetText()
         p:Hide()
+        C_Timer.After(0, function() cb(text) end)
     end,
     OnAccept = function(self, cb)
         local box = self.editBox or self.EditBox
-        cb(box:GetText())
+        local text = box:GetText()
+        C_Timer.After(0, function() cb(text) end)
     end,
+}
+
+StaticPopupDialogs["GUILDHUB_CONFIRM"] = {
+    text = "%s",
+    button1 = YES,
+    button2 = NO,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    OnAccept = function(self, fn) fn() end,
 }
 
 local function ask(prompt, cb)
@@ -79,8 +96,55 @@ local function requestText(rq)
     return string.format("%s - for %s [%s]", rq.item, rq.requester == GH.me and "you" or rq.requester, status)
 end
 
-local function crafterText(r)
-    return string.format("%s |cff555555(%s)|r - %s", r.recipe, r.prof, table.concat(r.crafters, ", "))
+local function crafterText(item)
+    if item.kind == "player" then
+        return string.format("%s  |cff555555- %s|r", item.name, table.concat(item.profs, ", "))
+    elseif item.kind == "prof" then
+        return string.format("%s |cff555555(%d recipes)|r", item.prof, item.count)
+    elseif item.kind == "recipe" then
+        return item.recipe
+    end
+    -- "found": a recipe matched by the search box, with everyone who can craft it
+    return string.format("%s |cff555555(%s)|r - %s", item.recipe, item.prof, table.concat(item.crafters, ", "))
+end
+
+-- Crafters drill-down: "players" -> "professions" (of one player) -> "recipes" (of one profession).
+-- Typing in the search box at the top level switches to "search": recipes across everyone.
+local function crafterLevel()
+    if crafterProf then return "recipes"
+    elseif crafterPlayer then return "professions"
+    elseif frame.search:GetText() ~= "" then return "search" end
+    return "players"
+end
+
+local function crafterItems(level)
+    local query = frame.search:GetText():lower()
+    local list = {}
+    if level == "players" then
+        for name, profs in pairs(GH.db.recipes) do
+            local names = {}
+            for prof in pairs(profs) do names[#names + 1] = prof end
+            table.sort(names)
+            if #names > 0 then list[#list + 1] = { kind = "player", name = name, profs = names } end
+        end
+        table.sort(list, function(a, b) return a.name < b.name end)
+    elseif level == "professions" then
+        for prof, entry in pairs(GH.db.recipes[crafterPlayer] or {}) do
+            list[#list + 1] = { kind = "prof", prof = prof, count = #entry.list }
+        end
+        table.sort(list, function(a, b) return a.prof < b.prof end)
+    elseif level == "recipes" then
+        local entry = GH.db.recipes[crafterPlayer] and GH.db.recipes[crafterPlayer][crafterProf]
+        for _, name in ipairs(entry and entry.list or {}) do
+            if query == "" or name:lower():find(query, 1, true) then
+                list[#list + 1] = { kind = "recipe", recipe = name }
+            end
+        end
+    else
+        list = GH:FindCrafters(query)
+        for _, r in ipairs(list) do r.kind = "found" end
+    end
+    return list
 end
 
 -- Items for the list currently shown.
@@ -102,21 +166,27 @@ local function viewItems(view)
         end
         return sorted(list)
     end
-    return GH:FindCrafters(frame.search:GetText())
+    return crafterItems(crafterLevel())
 end
 
 local EMPTY = {
     events = "No events yet. Click New Event to create one.",
     requests = "You haven't posted any requests. Click New Request, or pick a recipe under Crafters.",
     fulfill = "No open requests from your guildmates right now.",
-    crafters = "No matching recipes. Open your profession windows to share yours.",
+    crafters_players = "Nobody has shared their professions yet. Open your profession windows to share yours.",
+    crafters_professions = "No professions shared by this player.",
+    crafters_recipes = "No matching recipes.",
+    crafters_search = "No matching recipes.",
 }
 
 local HINTS = {
-    events = "Click: sign up   Right-click: edit slots   Shift-click: delete (host only)",
-    requests = "Right-click: mark as received   Shift-click: delete",
-    fulfill = "Click: take a request   Right-click: mark as crafted   Shift-click: give back a request you took",
-    crafters = "Type to search recipes. Click a recipe to post a craft request for it.",
+    events = "Click an event to sign up. The host also gets edit and delete buttons.",
+    requests = "Use the buttons on the right to mark a request as received or delete it.",
+    fulfill = "Use the + button to take a request; once it's yours you can mark it crafted or give it back.",
+    crafters_players = "Click a player to see their professions, or type to search for a recipe.",
+    crafters_professions = "Click a profession to see its recipes.",
+    crafters_recipes = "Click a recipe to post a craft request for it.",
+    crafters_search = "Click a recipe to post a craft request for it. Clear the search to browse by player.",
 }
 
 function GH:RefreshUI()
@@ -131,25 +201,46 @@ function GH:RefreshUI()
         b:SetShown(def.sections ~= nil)
         b:SetEnabled(b.key ~= section)
     end
-    frame.search:SetShown(view == "crafters")
+    local level = view == "crafters" and crafterLevel() or nil
+    local key = level and ("crafters_" .. level) or view
+    frame.search:SetShown(view == "crafters" and level ~= "professions")
+    frame.backBtn:SetShown(view == "crafters" and crafterPlayer ~= nil)
+    frame.crumb:SetShown(view == "crafters" and crafterPlayer ~= nil)
+    frame.crumb:SetText(crafterPlayer and (crafterPlayer .. (crafterProf and (" > " .. crafterProf) or "")) or "")
     frame.newBtn:SetShown(view == "events" or view == "requests")
     frame.newBtn:SetText(view == "events" and "New Event" or "New Request")
 
     local list = viewItems(view)
+    local pos = key .. "|" .. tostring(crafterPlayer) .. "|" .. tostring(crafterProf) .. "|" .. page
+    if pos ~= lastKey then offset, lastKey = 0, pos end -- new list: scroll back to the top
+    offset = math.max(0, math.min(offset, #list - MAX_ROWS))
+    frame.count = #list
+
     for i = 1, MAX_ROWS do
-        local row, item = rows[i], list[i]
+        local row, item = rows[i], list[offset + i]
         if item then
-            row.id, row.recipe = item.id, item.recipe
+            row.id, row.item = item.id, item
             row.text:SetText(view == "events" and eventText(item)
                 or view == "crafters" and crafterText(item) or requestText(item))
+            local acts = actionsFor(view, item)
+            for j, b in ipairs(row.actions) do
+                local a = acts[j]
+                if a then
+                    b.icon:SetTexture(a.icon)
+                    b.tip, b.fn = a.tip, a.fn
+                    b:Show()
+                else
+                    b:Hide()
+                end
+            end
             row:Show()
         else
             row:Hide()
         end
     end
-    frame.empty:SetText(EMPTY[view])
+    frame.empty:SetText(EMPTY[key])
     frame.empty:SetShown(#list == 0)
-    frame.hint:SetText(HINTS[view])
+    frame.hint:SetText(HINTS[key] .. (#list > MAX_ROWS and "   (scroll for more)" or ""))
 end
 
 local menu
@@ -209,26 +300,69 @@ local function showRoleMenu(id)
 end
 
 local function onRowClick(self, button)
+    if button ~= "LeftButton" then return end
     local view = currentView()
     if view == "crafters" then
-        GH:CreateRequest(self.recipe)
-        GH:Print("Posted a request for " .. self.recipe)
+        local item = self.item
+        if item.kind == "player" then
+            crafterPlayer = item.name
+            frame.search:SetText("")
+        elseif item.kind == "prof" then
+            crafterProf = item.prof
+            frame.search:SetText("")
+        else -- a recipe, from the profession list or from search results
+            GH:CreateRequest(item.recipe)
+            GH:Print("Posted a request for " .. item.recipe)
+        end
+        GH:RefreshUI()
     elseif view == "events" then
-        if IsShiftKeyDown() then GH:DeleteEvent(self.id)
-        elseif button == "RightButton" then
-            local id = self.id
+        showRoleMenu(self.id)
+    end
+    -- requests are handled by the buttons at the end of each row
+end
+
+local function confirm(prompt, fn)
+    StaticPopup_Show("GUILDHUB_CONFIRM", prompt, nil, fn)
+end
+
+local ICON = {
+    delete = "Interface\\RaidFrame\\ReadyCheck-NotReady", -- red X (the game has no bin icon to borrow)
+    done = "Interface\\RaidFrame\\ReadyCheck-Ready",      -- green check
+    edit = "Interface\\Buttons\\UI-OptionsButton",        -- gear
+    take = "Interface\\Buttons\\UI-PlusButton-Up",        -- plus
+    giveBack = "Interface\\Buttons\\UI-RefreshButton",    -- circular arrow
+}
+
+-- Icon buttons for a row, rightmost first. Each is { icon, tip, fn }.
+function actionsFor(view, item)
+    local acts = {}
+    local id = item.id
+    if view == "events" and item.host == GH.me then
+        acts[#acts + 1] = { icon = ICON.delete, tip = "Delete event", fn = function()
+            confirm("Delete the event '" .. item.title .. "' for everyone?", function() GH:DeleteEvent(id) end)
+        end }
+        acts[#acts + 1] = { icon = ICON.edit, tip = "Edit slots", fn = function()
             ask("New slots tank/healer/dps, e.g. 2/4/14 (blank = no limits):", function(caps)
                 GH:EditCaps(id, GH:ParseCaps(caps))
             end)
-        else showRoleMenu(self.id) end
+        end }
     elseif view == "requests" then
-        if IsShiftKeyDown() then GH:DeleteRequest(self.id)
-        elseif button == "RightButton" then GH:CompleteRequest(self.id) end
-    else -- fulfill
-        if IsShiftKeyDown() then GH:UnclaimRequest(self.id)
-        elseif button == "RightButton" then GH:CompleteRequest(self.id)
-        else GH:ClaimRequest(self.id) end
+        acts[#acts + 1] = { icon = ICON.delete, tip = "Delete request", fn = function()
+            confirm("Delete your request for '" .. item.item .. "'?", function() GH:DeleteRequest(id) end)
+        end }
+        if not item.done then
+            acts[#acts + 1] = { icon = ICON.done, tip = "Mark as received", fn = function() GH:CompleteRequest(id) end }
+        end
+    elseif view == "fulfill" then
+        if item.claimedBy == GH.me then
+            acts[#acts + 1] = { icon = ICON.done, tip = "Mark as crafted", fn = function() GH:CompleteRequest(id) end }
+            acts[#acts + 1] = { icon = ICON.giveBack, tip = "Give back (let someone else take it)",
+                                fn = function() GH:UnclaimRequest(id) end }
+        elseif not item.claimedBy then
+            acts[#acts + 1] = { icon = ICON.take, tip = "Take this request", fn = function() GH:ClaimRequest(id) end }
+        end
     end
+    return acts
 end
 
 local function newClicked()
@@ -313,6 +447,7 @@ function GH:InitUI()
         for _, s in ipairs(p.sections or {}) do
             local b = newButton(frame, s.label, 130, s.key, function()
                 section = s.key
+                if s.key == "crafters" then crafterPlayer, crafterProf = nil, nil end
                 GH:RefreshUI()
             end)
             local prev = frame.sectionButtons[#frame.sectionButtons]
@@ -329,6 +464,24 @@ function GH:InitUI()
     frame.search:SetScript("OnEscapePressed", frame.search.ClearFocus)
     frame.search:Hide()
 
+    -- Crafters drill-down: a Back button and a "Player > Profession" trail.
+    frame.backBtn = newButton(frame, "< Back", 80, nil, function()
+        if crafterProf then crafterProf = nil else crafterPlayer = nil end
+        frame.search:SetText("")
+        GH:RefreshUI()
+    end)
+    frame.backBtn:SetPoint("TOPRIGHT", -220, -110)
+    frame.backBtn:Hide()
+    frame.crumb = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.crumb:SetPoint("TOPLEFT", 460, -114)
+    frame.crumb:SetTextColor(unpack(TEXT))
+
+    frame:EnableMouseWheel(true)
+    frame:SetScript("OnMouseWheel", function(_, delta)
+        offset = math.max(0, math.min(offset - delta * 3, (frame.count or 0) - MAX_ROWS))
+        GH:RefreshUI()
+    end)
+
     frame.newBtn = newButton(frame, "New", 120, nil, newClicked)
     frame.newBtn:SetPoint("TOPRIGHT", -24, -110)
 
@@ -340,7 +493,27 @@ function GH:InitUI()
         row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
         row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         row.text:SetPoint("LEFT", 4, 0)
+        row.text:SetPoint("RIGHT", row, "RIGHT", -52, 0) -- leave room for the action buttons
         row.text:SetJustifyH("LEFT")
+        row.text:SetWordWrap(false)
+        row.actions = {}
+        for j = 1, 2 do
+            local b = CreateFrame("Button", nil, row)
+            b:SetSize(18, 18)
+            b:SetPoint("RIGHT", -4 - (j - 1) * 22, 0)
+            b.icon = b:CreateTexture(nil, "ARTWORK")
+            b.icon:SetAllPoints()
+            b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+            b:SetScript("OnClick", function(self) if self.fn then self.fn() end end)
+            b:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_TOP")
+                GameTooltip:SetText(self.tip or "")
+                GameTooltip:Show()
+            end)
+            b:SetScript("OnLeave", GameTooltip_Hide)
+            b:Hide()
+            row.actions[j] = b
+        end
         row.text:SetTextColor(unpack(TEXT))
         row:SetScript("OnClick", onRowClick)
         row:SetScript("OnEnter", function(self)

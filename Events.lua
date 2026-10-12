@@ -145,6 +145,8 @@ function GH:CreateEvent(title, when, caps)
     self.db.events[ev.id] = ev
     self:BroadcastEvent(ev)
     self:RefreshUI()
+    self:Print("Created event '" .. title .. "'." ..
+        (IsInGuild() and "" or " You're not in a guild, so it's only saved on this character's addon data."))
 end
 
 -- role = "tank" | "healer" | "dps", or nil to withdraw.
