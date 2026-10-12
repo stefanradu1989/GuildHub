@@ -4,7 +4,8 @@ local BANNER = 36 -- height of the guild-name banner under the window title; eve
 local FRAME_W, FRAME_H = 1120, 720 + BANNER
 local ROW_H = 22
 local ROWS_TOP = 146 + BANNER -- distance from the top of the window to the first row
-local MAX_ROWS = math.floor((FRAME_H - ROWS_TOP - 30) / ROW_H) -- room below the page header, above the hint line
+local MAX_ROWS = math.floor((FRAME_H - ROWS_TOP - 44) / ROW_H) -- room below the page header, above the hint and version lines
+local ACTIONS_PER_ROW = 4
 local frame, rows = nil, {}
 
 local PARCHMENT_ATLAS = "QuestBG-Parchment"
@@ -21,8 +22,16 @@ local PAGES = {
           { key = "fulfill", label = "Fulfill Requests" },
           { key = "crafters", label = "Crafters" },
       } },
+    { key = "board", label = "Board", title = "Guild Board" },
+    { key = "guild", label = "Guild", title = "Guild",
+      sections = {
+          { key = "bank", label = "Bank Requests" },
+          { key = "attendance", label = "Attendance" },
+          { key = "leaderboard", label = "Leaderboard" },
+      } },
 }
-local page, section = "events", "requests"
+local page = "events"
+local sections = { crafting = "requests", guild = "bank" } -- the section open on each page
 local crafterPlayer, crafterProf -- drill-down position in the Crafters section
 local offset, lastKey = 0, nil   -- list scroll position, reset whenever the list changes
 local actionsFor                 -- defined below; RefreshUI needs it first
@@ -30,52 +39,16 @@ local actionsFor                 -- defined below; RefreshUI needs it first
 -- Filters on the Events page (kept for the session). The name filter is the search box.
 local filters = { kind = "any", date = "upcoming", role = "any" }
 local reqFilter = { prof = "any" } -- Requests / Fulfill filter; the item-name filter is the search box
-local KIND_CYCLE = { "any", "raid", "dungeon", "battleground" }
-local DATE_CYCLE = { "upcoming", "today", "week", "past", "all" }
-local ROLE_CYCLE = { "any", "tank", "healer", "dps" }
+local KIND_LIST = { "any", "raid", "dungeon", "battleground" }
+local DATE_LIST = { "upcoming", "today", "week", "past", "all" }
+local ROLE_LIST = { "any", "tank", "healer", "dps" }
 local DATE_LABEL = { upcoming = "Upcoming", today = "Today", week = "Next 7 days", past = "Past", all = "All" }
+local ROLE_LABEL = { any = "Any", tank = "Tank", healer = "Healer", dps = "DPS" }
 
--- The list currently shown: "events", "requests", "fulfill" or "crafters".
+-- The list currently shown: events, requests, fulfill, crafters, board, bank, attendance or leaderboard.
 local function currentView()
-    return page == "events" and "events" or section
-end
-
-StaticPopupDialogs["GUILDHUB_NEW"] = {
-    text = "%s",
-    button1 = ACCEPT,
-    button2 = CANCEL,
-    hasEditBox = true,
-    maxLetters = 60,
-    timeout = 0,
-    whileDead = true,
-    hideOnEscape = true,
-    -- The callback runs on the next frame: if it opens another prompt (as creating an event does),
-    -- that prompt would otherwise be closed right after this handler returns.
-    EditBoxOnEnterPressed = function(self)
-        local p = self:GetParent()
-        local cb, text = p.data, self:GetText()
-        p:Hide()
-        C_Timer.After(0, function() cb(text) end)
-    end,
-    OnAccept = function(self, cb)
-        local box = self.editBox or self.EditBox
-        local text = box:GetText()
-        C_Timer.After(0, function() cb(text) end)
-    end,
-}
-
-StaticPopupDialogs["GUILDHUB_CONFIRM"] = {
-    text = "%s",
-    button1 = YES,
-    button2 = NO,
-    timeout = 0,
-    whileDead = true,
-    hideOnEscape = true,
-    OnAccept = function(self, fn) fn() end,
-}
-
-local function ask(prompt, cb)
-    StaticPopup_Show("GUILDHUB_NEW", prompt, nil, cb)
+    if page == "events" or page == "board" then return page end
+    return sections[page]
 end
 
 local function sorted(list)
@@ -83,48 +56,131 @@ local function sorted(list)
     return list
 end
 
+-- Event rows ------------------------------------------------------------------------------------------------
+
+local function colorOf(list, key)
+    for _, e in ipairs(list) do
+        if e.key == key then return e end
+    end
+end
+
+-- Your sign-up as a colored tag, e.g. [Tank], [Waitlist: Healer] or [Tentative].
+local function eventMark(ev)
+    local kind, val = GH:StateOf(ev, GH.me)
+    if kind == "role" then
+        local r = colorOf(GH.ROLES, val)
+        return string.format("|c%s[%s]|r ", r.color, r.label)
+    elseif kind == "wait" then
+        local r = colorOf(GH.ROLES, val)
+        return string.format("|cff8a6d00[Waitlist: %s]|r ", r.label)
+    elseif kind == "status" then
+        local s = colorOf(GH.STATUSES, val)
+        return string.format("|c%s[%s]|r ", s.color, s.label)
+    end
+    return ""
+end
+
 local function eventText(ev)
-    local roster = GH:RosterByRole(ev)
-    local parts = {}
+    local roster = GH:Roster(ev)
+    local parts, waiting = {}, 0
     for _, r in ipairs(GH.ROLES) do
         local cap = GH:CapOf(ev, r.key)
         parts[#parts + 1] = string.format("|c%s%d%s|r", r.color, #roster[r.key], cap > 0 and ("/" .. cap) or "")
+        waiting = waiting + #roster.wait[r.key]
     end
-    local counts = table.concat(parts, " ")
-    local mine = GH:RoleOf(ev, GH.me)
     local kindTag = ""
-    for _, k in ipairs(GH.KINDS) do
-        if k.key == ev.kind then kindTag = string.format("|c%s[%s]|r ", k.color, k.label) end
+    local k = colorOf(GH.KINDS, ev.kind)
+    if k then kindTag = string.format("|c%s[%s]|r ", k.color, k.label) end
+    local extra = ""
+    if waiting > 0 then extra = extra .. "  |cff555555+" .. waiting .. " waiting|r" end
+    if ev.repeatDays then extra = extra .. "  |cff555555(weekly)|r" end
+    return string.format("%s%s%s - %s (host %s)  T/H/D %s%s", eventMark(ev), kindTag, ev.title, GH:WhenText(ev),
+        ev.host, table.concat(parts, " "), extra)
+end
+
+local function eventTooltip(owner, ev)
+    local roster = GH:Roster(ev)
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(ev.title)
+    GameTooltip:AddLine(GH:WhenText(ev) .. (ev.start and (" " .. date("%Z", ev.start)) or ""), 1, 1, 1)
+    if ev.start then GameTooltip:AddLine("Shown in your local time", 0.6, 0.6, 0.6) end
+    if ev.desc then GameTooltip:AddLine(ev.desc, 1, 0.82, 0, true) end
+    for _, r in ipairs(GH.ROLES) do
+        local names = roster[r.key]
+        local cap = GH:CapOf(ev, r.key)
+        GameTooltip:AddLine(string.format("|c%s%s (%d%s)|r: %s", r.color, r.label, #names,
+            cap > 0 and ("/" .. cap) or "", #names > 0 and table.concat(names, ", ") or "-"), 1, 1, 1, true)
     end
-    local mark = ""
-    if mine then
-        for _, r in ipairs(GH.ROLES) do
-            if r.key == mine then mark = string.format("|c%s[%s]|r ", r.color, r.label) end
+    for _, r in ipairs(GH.ROLES) do
+        local names = roster.wait[r.key]
+        if #names > 0 then
+            GameTooltip:AddLine(string.format("Waitlist, %s: %s", r.label, table.concat(names, ", ")), 0.9, 0.7, 0.2, true)
         end
     end
-    return string.format("%s%s%s - %s (host %s)  T/H/D %s", mark, kindTag, ev.title, GH:WhenText(ev), ev.host, counts)
+    for _, s in ipairs(GH.STATUSES) do
+        local names = roster[s.key]
+        if #names > 0 then
+            GameTooltip:AddLine(string.format("%s (%d): %s", s.label, #names, table.concat(names, ", ")), 0.7, 0.7, 0.7, true)
+        end
+    end
+    if ev.attended then
+        local n = 0
+        for _ in pairs(ev.attended) do n = n + 1 end
+        GameTooltip:AddLine("Attendance recorded: " .. n .. " players", 0.6, 0.9, 0.6)
+    end
+    GameTooltip:AddLine("Share code: #" .. GH:ShortId(ev.id), 0.6, 0.6, 0.6)
+    GameTooltip:Show()
 end
+
+-- Request rows ----------------------------------------------------------------------------------------------
 
 -- A request's profession: stored when it was made, else looked up from the shared recipes (nil if unknown).
 local function requestProf(rq)
     return rq.prof or GH:ProfessionOf(rq.item)
 end
 
-local function requestMatches(rq)
+local function requestMatches(rq, useProfession)
     local query = frame.search:GetText():lower()
     if query ~= "" and not rq.item:lower():find(query, 1, true) then return false end
-    return reqFilter.prof == "any" or (requestProf(rq) or "other") == reqFilter.prof
+    return not useProfession or reqFilter.prof == "any" or (requestProf(rq) or "other") == reqFilter.prof
+end
+
+-- The item's colored name when the game knows the item, else the name that was typed.
+local function itemName(rq)
+    if rq.itemID then
+        local getInfo = GetItemInfo or (C_Item and C_Item.GetItemInfo)
+        if getInfo then
+            local a, b = getInfo(rq.itemID)
+            if type(a) == "table" then
+                if a.hyperlink then return a.hyperlink end
+            elseif b then
+                return b
+            end
+        end
+    end
+    return rq.item
 end
 
 local function requestText(rq)
-    local profTag = requestProf(rq) and ("|cff555555[" .. requestProf(rq) .. "]|r ") or ""
+    local prof = (not rq.bank) and requestProf(rq)
+    local tag = rq.bank and "|cff2a6a8a[Bank]|r " or (prof and ("|cff555555[" .. prof .. "]|r ") or "")
     local status
     if rq.done then status = "|cff555555done|r"
     elseif rq.claimedBy == GH.me then status = "|cff8a6d00claimed by you|r"
     elseif rq.claimedBy then status = "|cff8a6d00claimed by " .. rq.claimedBy .. "|r"
     else status = "|cff1a7a1aopen|r" end
-    return string.format("%s%s - for %s [%s]", profTag, rq.item, rq.requester == GH.me and "you" or rq.requester, status)
+    local extra = ""
+    if rq.mats then extra = extra .. "  |cff555555- " .. rq.mats .. "|r" end
+    if rq.due then
+        local urgent = not rq.done and rq.due - time() < 86400
+        extra = extra .. string.format("  |c%sneeded by %s|r", urgent and "ffc0301a" or "ff555555",
+            date("%a %d %b %H:%M", rq.due))
+    end
+    return string.format("%s%s - for %s [%s]%s", tag, itemName(rq), rq.requester == GH.me and "you" or rq.requester,
+        status, extra)
 end
+
+-- Other rows ------------------------------------------------------------------------------------------------
 
 local function crafterText(item)
     if item.kind == "player" then
@@ -136,6 +192,29 @@ local function crafterText(item)
     end
     -- "found": a recipe matched by the search box, with everyone who can craft it
     return string.format("%s |cff555555(%s)|r - %s", item.recipe, item.prof, table.concat(item.crafters, ", "))
+end
+
+local function boardText(a)
+    return string.format("|cff8a6d00%s|r  %s  |cff555555(%s)|r", a.author, a.text, date("%d %b", a.ts))
+end
+
+local function attendanceText(s)
+    return string.format("%s - attended %d, signed up for %d%s", s.name, s.attended, s.signed,
+        s.rate and string.format(" (%d%%)", s.rate) or "")
+end
+
+local function leaderboardText(s)
+    return string.format("%d. %s - fulfilled %d, requested %d", s.rank, s.name, s.fulfilled, s.requested)
+end
+
+local function rowText(view, item)
+    if view == "events" then return eventText(item)
+    elseif view == "crafters" then return crafterText(item)
+    elseif view == "board" then return boardText(item)
+    elseif view == "attendance" then return attendanceText(item)
+    elseif view == "leaderboard" then return leaderboardText(item)
+    end
+    return requestText(item)
 end
 
 -- Crafters drill-down: "players" -> "professions" (of one player) -> "recipes" (of one profession).
@@ -155,7 +234,7 @@ local function crafterItems(level)
             local names = {}
             for prof in pairs(profs) do names[#names + 1] = prof end
             table.sort(names)
-            if #names > 0 then list[#list + 1] = { kind = "player", name = name, profs = names } end
+            if #names > 0 and GH:IsMember(name) then list[#list + 1] = { kind = "player", name = name, profs = names } end
         end
         table.sort(list, function(a, b) return a.name < b.name end)
     elseif level == "professions" then
@@ -167,7 +246,8 @@ local function crafterItems(level)
         local entry = GH.db.recipes[crafterPlayer] and GH.db.recipes[crafterPlayer][crafterProf]
         for _, name in ipairs(entry and entry.list or {}) do
             if query == "" or name:lower():find(query, 1, true) then
-                list[#list + 1] = { kind = "recipe", recipe = name }
+                list[#list + 1] = { kind = "recipe", recipe = name, prof = crafterProf,
+                                    itemID = entry.items and entry.items[name] }
             end
         end
     else
@@ -208,19 +288,35 @@ local function viewItems(view)
             return (a.ts or 0) > (b.ts or 0)
         end)
         return list
-    elseif view == "requests" then -- requests I posted
+    elseif view == "requests" then -- craft requests I posted
         for _, rq in pairs(GH.db.requests) do
-            if rq.requester == GH.me and requestMatches(rq) then list[#list + 1] = rq end
+            if not rq.bank and rq.requester == GH.me and requestMatches(rq, true) then list[#list + 1] = rq end
         end
         return sorted(list)
-    elseif view == "fulfill" then -- other people's requests I could take, plus the ones I already took
+    elseif view == "fulfill" then -- other people's craft requests I could take, plus the ones I already took
         for _, rq in pairs(GH.db.requests) do
-            if rq.requester ~= GH.me and not rq.done and (not rq.claimedBy or rq.claimedBy == GH.me)
-                and requestMatches(rq) then
+            if not rq.bank and rq.requester ~= GH.me and not rq.done and (not rq.claimedBy or rq.claimedBy == GH.me)
+                and requestMatches(rq, true) then
                 list[#list + 1] = rq
             end
         end
         return sorted(list)
+    elseif view == "bank" then -- guild bank requests: everyone's open ones, plus my own
+        for _, rq in pairs(GH.db.requests) do
+            if rq.bank and (not rq.done or rq.requester == GH.me) and requestMatches(rq, false) then
+                list[#list + 1] = rq
+            end
+        end
+        return sorted(list)
+    elseif view == "board" then
+        for _, a in pairs(GH.db.board) do list[#list + 1] = a end
+        return sorted(list)
+    elseif view == "attendance" then
+        return GH:AttendanceStats()
+    elseif view == "leaderboard" then
+        list = GH:Leaderboard()
+        for i, s in ipairs(list) do s.rank = i end
+        return list
     end
     return crafterItems(crafterLevel())
 end
@@ -235,16 +331,24 @@ local EMPTY = {
     crafters_professions = "No professions shared by this player.",
     crafters_recipes = "No matching recipes.",
     crafters_search = "No matching recipes.",
+    board = "No announcements yet.",
+    bank = "No guild bank requests.",
+    attendance = "No attendance recorded yet. Event hosts can record it with the crown button on an event.",
+    leaderboard = "Nothing here yet. Finished requests show up here.",
 }
 
 local HINTS = {
-    events = "Click an event to sign up. Use the buttons above to filter by type, date or a free role slot; the host also gets edit and delete buttons.",
-    requests = "Use the buttons on the right to mark a request as received or delete it. Filter by profession or item name above.",
-    fulfill = "Use the + button to take a request; once it's yours you can mark it crafted or give it back. Filter above.",
-    crafters_players = "Click a player to see their professions, or type to search for a recipe.",
+    events = "Click an event to sign up. Row buttons: share in guild chat (hosts also edit, record attendance, delete).",
+    requests = "Row buttons: mark as received, delete, or whisper whoever took it. Filter by profession or item name above.",
+    fulfill = "+ takes a request; once it's yours, mark it crafted or give it back. The speech bubble whispers the requester.",
+    crafters_players = "Click a player to see their professions, or type to search for a recipe. The speech bubble whispers them.",
     crafters_professions = "Click a profession to see its recipes.",
-    crafters_recipes = "Click a recipe to post a craft request for it.",
-    crafters_search = "Click a recipe to post a craft request for it. Clear the search to browse by player.",
+    crafters_recipes = "Click a recipe to request it; hover for the item. The speech bubble whispers this player.",
+    crafters_search = "Click a recipe to request it. Clear the search to browse by player.",
+    board = "Announcements from your officers. Officers can post them with New Announcement.",
+    bank = "Ask the guild bank for an item. Whoever can help takes it with the + button.",
+    attendance = "Counts events where the host recorded who was in the group.",
+    leaderboard = "Counts the requests this client has seen being finished.",
 }
 
 function GH:RefreshUI()
@@ -257,31 +361,33 @@ function GH:RefreshUI()
     frame.pageTitle:SetText(def.title)
     for _, b in ipairs(frame.pageButtons) do b:SetEnabled(b.key ~= page) end
     for _, b in ipairs(frame.sectionButtons) do
-        b:SetShown(def.sections ~= nil)
-        b:SetEnabled(b.key ~= section)
+        b:SetShown(b.page == page)
+        b:SetEnabled(sections[b.page] ~= b.key)
     end
     local level = view == "crafters" and crafterLevel() or nil
     local key = level and ("crafters_" .. level) or view
-    local isRequests = view == "requests" or view == "fulfill"
+    local isRequests = view == "requests" or view == "fulfill" or view == "bank"
+    local showNew = view == "events" or view == "requests" or view == "bank" or (view == "board" and GH:IsOfficer())
+
+    frame.newBtn:SetShown(showNew)
+    frame.newBtn:SetText(view == "events" and "New Event" or view == "board" and "New Announcement"
+        or view == "bank" and "New Bank Request" or "New Request")
     frame.search:SetShown(view == "events" or isRequests or (view == "crafters" and level ~= "professions"))
     frame.search:ClearAllPoints()
-    -- the New Event / New Request button sits at the right edge, so the search box moves left of it
-    frame.search:SetPoint("TOPRIGHT", view == "crafters" and -30 or -154, -111 - BANNER)
+    -- the New ... button sits at the right edge, so the search box moves left of it
+    frame.search:SetPoint("TOPRIGHT", showNew and -190 or -30, -111 - BANNER)
     frame.searchLabel:SetShown(view == "events" or isRequests)
     frame.searchLabel:SetText(view == "events" and "Name:" or "Item:")
-    frame.profButton:SetShown(isRequests)
+    frame.profButton:SetShown(view == "requests" or view == "fulfill")
     frame.profButton:SetText("Profession: " .. (reqFilter.prof == "any" and "All"
         or reqFilter.prof == "other" and "Unknown" or reqFilter.prof))
     for _, b in pairs(frame.filterButtons) do b:SetShown(view == "events") end
     frame.filterButtons.kind:SetText("Type: " .. (filters.kind == "any" and "All" or filters.kind:gsub("^%l", string.upper)))
     frame.filterButtons.date:SetText("Date: " .. DATE_LABEL[filters.date])
-    frame.filterButtons.role:SetText("Free slot: " .. (filters.role == "any" and "Any" or
-        (filters.role == "dps" and "DPS" or filters.role:gsub("^%l", string.upper))))
+    frame.filterButtons.role:SetText("Free slot: " .. ROLE_LABEL[filters.role])
     frame.backBtn:SetShown(view == "crafters" and crafterPlayer ~= nil)
     frame.crumb:SetShown(view == "crafters" and crafterPlayer ~= nil)
     frame.crumb:SetText(crafterPlayer and (crafterPlayer .. (crafterProf and (" > " .. crafterProf) or "")) or "")
-    frame.newBtn:SetShown(view == "events" or view == "requests")
-    frame.newBtn:SetText(view == "events" and "New Event" or "New Request")
 
     local list = viewItems(view)
     local pos = table.concat({ key, tostring(crafterPlayer), tostring(crafterProf), page,
@@ -294,8 +400,7 @@ function GH:RefreshUI()
         local row, item = rows[i], list[offset + i]
         if item then
             row.id, row.item = item.id, item
-            row.text:SetText(view == "events" and eventText(item)
-                or view == "crafters" and crafterText(item) or requestText(item))
+            row.text:SetText(rowText(view, item))
             local acts = actionsFor(view, item)
             for j, b in ipairs(row.actions) do
                 local a = acts[j]
@@ -315,7 +420,7 @@ function GH:RefreshUI()
     local emptyKey = key
     if view == "events" and next(GH.db.events) then
         emptyKey = "events_filtered"
-    elseif isRequests and (reqFilter.prof ~= "any" or frame.search:GetText() ~= "") then
+    elseif (view == "requests" or view == "fulfill") and (reqFilter.prof ~= "any" or frame.search:GetText() ~= "") then
         emptyKey = "requests_filtered"
     end
     frame.empty:SetText(EMPTY[emptyKey])
@@ -323,67 +428,118 @@ function GH:RefreshUI()
     frame.hint:SetText(HINTS[key] .. (#list > MAX_ROWS and "   (scroll for more)" or ""))
 end
 
-local menu
+-- Menus and forms ---------------------------------------------------------------------------------------------
 
+-- Sign up: pick a role (a full one puts you on its waitlist), tentative, declined, or withdraw.
 local function showRoleMenu(id)
-    if not menu then
-        local catcher = CreateFrame("Button", nil, UIParent)
-        catcher:SetAllPoints(UIParent)
-        catcher:SetFrameStrata("FULLSCREEN")
-        catcher:Hide()
-        catcher:SetScript("OnClick", function(self) self:Hide(); menu:Hide() end)
-
-        menu = CreateFrame("Frame", nil, UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-        menu:SetFrameStrata("FULLSCREEN_DIALOG")
-        menu:SetSize(120, 4 * 22 + 12)
-        menu:SetBackdrop({ bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-                           edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-                           edgeSize = 12, insets = { left = 3, right = 3, top = 3, bottom = 3 } })
-        menu:SetBackdropColor(0, 0, 0, 0.95)
-        menu.catcher = catcher
-        menu:SetScript("OnHide", function(self) self.catcher:Hide() end)
-
-        local choices = {}
-        for _, r in ipairs(GH.ROLES) do
-            choices[#choices + 1] = { key = r.key, label = "|c" .. r.color .. r.label .. "|r" }
-        end
-        choices[#choices + 1] = { key = nil, label = "Withdraw" }
-        for i, c in ipairs(choices) do
-            local btn = CreateFrame("Button", nil, menu)
-            btn:SetSize(108, 22)
-            btn:SetPoint("TOPLEFT", 6, -6 - (i - 1) * 22)
-            btn:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
-            btn.text = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            btn.text:SetPoint("LEFT", 6, 0)
-            btn.text:SetText(c.label)
-            btn:SetScript("OnClick", function()
-                GH:SetRole(menu.eventId, c.key)
-                menu:Hide()
-            end)
-            btn.key, btn.baseLabel = c.key, c.label
-            menu.buttons = menu.buttons or {}
-            menu.buttons[i] = btn
-        end
-    end
-    menu.eventId = id
     local ev = GH.db.events[id]
-    for _, btn in ipairs(menu.buttons) do
-        local full = ev and btn.key and GH:IsFull(ev, btn.key)
-        btn.text:SetText(btn.baseLabel .. (full and " |cff555555(full)|r" or ""))
+    if not ev then return end
+    local choices = {}
+    for _, r in ipairs(GH.ROLES) do
+        local full = GH:IsFull(ev, r.key)
+        choices[#choices + 1] = { label = "|c" .. r.color .. r.label .. "|r" .. (full and " |cff888888(full - join waitlist)|r" or ""),
+                                  value = r.key }
     end
-    local x, y = GetCursorPosition()
-    local scale = UIParent:GetEffectiveScale()
-    menu:ClearAllPoints()
-    menu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", x / scale, y / scale)
-    menu.catcher:Show()
-    menu:Show()
+    for _, s in ipairs(GH.STATUSES) do
+        choices[#choices + 1] = { label = "|c" .. s.color .. s.label .. "|r", value = s.key }
+    end
+    choices[#choices + 1] = { label = "Withdraw", value = "none" }
+    local kind, val = GH:StateOf(ev, GH.me)
+    local current = (kind == "role" or kind == "status") and val or "none"
+    GH.ShowChoice(choices, function(v) GH:SetRole(id, v ~= "none" and v or nil) end, nil, current)
+end
+
+local function editEventMenu(ev)
+    local id = ev.id
+    GH.ShowChoice({
+        { label = "Edit slots", value = "slots" },
+        { label = "Edit time", value = "when" },
+        { label = "Edit description", value = "desc" },
+        { label = ev.repeatDays and "Stop repeating weekly" or "Repeat weekly", value = "repeat" },
+    }, function(v)
+        if v == "slots" then
+            GH.Ask("New slots tank/healer/dps, e.g. 2/4/14 (blank = no limits):", function(t) GH:EditCaps(id, GH:ParseCaps(t)) end)
+        elseif v == "when" then
+            GH.Ask("New time (your local time), e.g. sat 20:00 or 2026-11-04 20:00:", function(t) GH:EditWhen(id, t) end)
+        elseif v == "desc" then
+            GH.Ask("New description (blank = none):", function(t) GH:EditDesc(id, t) end, true)
+        else
+            GH:SetRepeat(id, ev.repeatDays and 0 or 7)
+        end
+    end)
+end
+
+local function newEventForm()
+    local kinds = {}
+    for _, k in ipairs(GH.KINDS) do kinds[#kinds + 1] = { label = k.label, value = k.key } end
+    GH:ShowForm({
+        title = "New Event",
+        fields = {
+            { key = "title", label = "Title", max = 60, required = true },
+            { key = "when", label = "When (your local time): sat 20:00, tomorrow 20:00, 2026-11-04 20:00", max = 40 },
+            { key = "slots", label = "Slots tank/healer/dps, e.g. 2/4/14 (0 = no limit; blank = default)", max = 20 },
+            { key = "desc", label = "Description (optional)", max = 150 },
+        },
+        choices = {
+            { key = "kind", label = "Type", options = kinds, default = "raid" },
+            { key = "repeatDays", label = "Repeat", options = { { label = "Never", value = 0 }, { label = "Every week", value = 7 } },
+              default = 0 },
+        },
+        submitText = "Create",
+        onSubmit = function(v)
+            local caps = GH:ParseCaps(v.slots)
+            if not caps then
+                local k = colorOf(GH.KINDS, v.kind)
+                caps = k and k.defaultCaps
+            end
+            GH:CreateEvent({ title = v.title, when = v.when, caps = caps, kind = v.kind, desc = v.desc,
+                             repeatDays = v.repeatDays })
+        end,
+    })
+end
+
+-- opts: item (prefilled text), prof, itemID (from the Crafters list), bank
+local function requestForm(opts)
+    opts = opts or {}
+    GH:ShowForm({
+        title = opts.bank and "New Guild Bank Request" or "New Craft Request",
+        fields = {
+            { key = "item", label = opts.bank and "Item you need from the guild bank" or "Item you need crafted",
+              max = 60, required = true, default = opts.item },
+            { key = "mats", label = opts.bank and "Quantity or notes (optional)" or "Materials you'll provide, or notes (optional)", max = 60 },
+            { key = "due", label = "Needed by (optional) - e.g. sat, tomorrow 20:00, 2026-11-04", max = 40 },
+        },
+        submitText = "Post request",
+        onSubmit = function(v)
+            local same = opts.item and v.item:lower() == opts.item:lower()
+            GH:CreateRequest({ item = v.item, mats = v.mats, due = v.due, bank = opts.bank,
+                               prof = same and opts.prof or nil, itemID = same and opts.itemID or nil })
+        end,
+    })
+end
+
+local function newAnnouncementForm()
+    GH:ShowForm({
+        title = "New Announcement",
+        fields = { { key = "text", label = "Message (shown to the whole guild)", max = 150, required = true } },
+        submitText = "Post",
+        onSubmit = function(v) GH:PostAnnouncement(v.text) end,
+    })
+end
+
+local function newClicked()
+    local view = currentView()
+    if view == "events" then newEventForm()
+    elseif view == "board" then newAnnouncementForm()
+    elseif view == "bank" then requestForm({ bank = true })
+    else requestForm() end
 end
 
 local function onRowClick(self, button)
     if button ~= "LeftButton" then return end
     local view = currentView()
+    local item = self.item
     if view == "crafters" then
-        local item = self.item
         if item.kind == "player" then
             crafterPlayer = item.name
             frame.search:SetText("")
@@ -391,19 +547,16 @@ local function onRowClick(self, button)
             crafterProf = item.prof
             frame.search:SetText("")
         else -- a recipe, from the profession list or from search results
-            GH:CreateRequest(item.recipe, item.prof or crafterProf)
-            GH:Print("Posted a request for " .. item.recipe)
+            requestForm({ item = item.recipe, prof = item.prof or crafterProf, itemID = item.itemID })
         end
         GH:RefreshUI()
     elseif view == "events" then
         showRoleMenu(self.id)
     end
-    -- requests are handled by the buttons at the end of each row
+    -- everything else is handled by the buttons at the end of each row
 end
 
-local function confirm(prompt, fn)
-    StaticPopup_Show("GUILDHUB_CONFIRM", prompt, nil, fn)
-end
+-- Row buttons -----------------------------------------------------------------------------------------------
 
 local ICON = {
     delete = "Interface\\RaidFrame\\ReadyCheck-NotReady", -- red X (the game has no bin icon to borrow)
@@ -411,127 +564,98 @@ local ICON = {
     edit = "Interface\\Buttons\\UI-OptionsButton",        -- gear
     take = "Interface\\Buttons\\UI-PlusButton-Up",        -- plus
     giveBack = "Interface\\Buttons\\UI-RefreshButton",    -- circular arrow
+    whisper = "Interface\\ChatFrame\\UI-ChatIcon-Chat-Up", -- speech bubble
+    share = "Interface\\Buttons\\UI-GuildButton-MOTD-Up", -- megaphone
+    attend = "Interface\\GroupFrame\\UI-Group-LeaderIcon", -- crown
 }
 
 -- Icon buttons for a row, rightmost first. Each is { icon, tip, fn }.
 function actionsFor(view, item)
     local acts = {}
     local id = item.id
-    if view == "events" and item.host == GH.me then
-        acts[#acts + 1] = { icon = ICON.delete, tip = "Delete event", fn = function()
-            confirm("Delete the event '" .. item.title .. "' for everyone?", function() GH:DeleteEvent(id) end)
-        end }
-        acts[#acts + 1] = { icon = ICON.edit, tip = "Edit slots", fn = function()
-            ask("New slots tank/healer/dps, e.g. 2/4/14 (blank = no limits):", function(caps)
-                GH:EditCaps(id, GH:ParseCaps(caps))
+    local function add(icon, tip, fn) acts[#acts + 1] = { icon = icon, tip = tip, fn = fn } end
+
+    if view == "events" then
+        if item.host == GH.me then
+            add(ICON.delete, "Delete event", function()
+                GH.Confirm("Delete the event '" .. item.title .. "' for everyone?", function() GH:DeleteEvent(id) end)
             end)
-        end }
-    elseif view == "requests" then
-        acts[#acts + 1] = { icon = ICON.delete, tip = "Delete request", fn = function()
-            confirm("Delete your request for '" .. item.item .. "'?", function() GH:DeleteRequest(id) end)
-        end }
-        if not item.done then
-            acts[#acts + 1] = { icon = ICON.done, tip = "Mark as received", fn = function() GH:CompleteRequest(id) end }
+            add(ICON.edit, "Edit slots, time, description or repeat", function() editEventMenu(item) end)
+            add(ICON.attend, "Record attendance (everyone in your group)", function() GH:RecordAttendance(id) end)
+        end
+        add(ICON.share, "Share in guild chat", function() GH:ShareEvent(id) end)
+    elseif view == "requests" or view == "bank" then
+        if item.requester == GH.me then
+            add(ICON.delete, "Delete request", function()
+                GH.Confirm("Delete your request for '" .. item.item .. "'?", function() GH:DeleteRequest(id) end)
+            end)
+            if not item.done then
+                add(ICON.done, "Mark as received", function() GH:CompleteRequest(id) end)
+            end
+            if item.claimedBy then
+                add(ICON.whisper, "Whisper " .. item.claimedBy, function()
+                    GH:Whisper(item.claimedBy, "Hi! About my request for " .. item.item .. " - ")
+                end)
+            end
+        else -- a bank request from someone else
+            if item.claimedBy == GH.me then
+                add(ICON.done, "Mark as fulfilled", function() GH:CompleteRequest(id) end)
+                add(ICON.giveBack, "Give back (let someone else take it)", function() GH:UnclaimRequest(id) end)
+            elseif not item.claimedBy then
+                add(ICON.take, "Take this request", function() GH:ClaimRequest(id) end)
+            end
+            add(ICON.whisper, "Whisper " .. item.requester, function()
+                GH:Whisper(item.requester, "Hi! About your request for " .. item.item .. " - ")
+            end)
         end
     elseif view == "fulfill" then
         if item.claimedBy == GH.me then
-            acts[#acts + 1] = { icon = ICON.done, tip = "Mark as crafted", fn = function() GH:CompleteRequest(id) end }
-            acts[#acts + 1] = { icon = ICON.giveBack, tip = "Give back (let someone else take it)",
-                                fn = function() GH:UnclaimRequest(id) end }
+            add(ICON.done, "Mark as crafted", function() GH:CompleteRequest(id) end)
+            add(ICON.giveBack, "Give back (let someone else take it)", function() GH:UnclaimRequest(id) end)
         elseif not item.claimedBy then
-            acts[#acts + 1] = { icon = ICON.take, tip = "Take this request", fn = function() GH:ClaimRequest(id) end }
+            add(ICON.take, "Take this request", function() GH:ClaimRequest(id) end)
+        end
+        add(ICON.whisper, "Whisper " .. item.requester, function()
+            GH:Whisper(item.requester, "Hi! I can craft " .. item.item .. " for you. ")
+        end)
+    elseif view == "board" then
+        if item.author == GH.me then
+            add(ICON.delete, "Delete announcement", function()
+                GH.Confirm("Delete this announcement for everyone?", function() GH:DeleteAnnouncement(id) end)
+            end)
+        end
+    elseif view == "crafters" then
+        if item.kind == "player" then
+            add(ICON.whisper, "Whisper " .. item.name, function() GH:Whisper(item.name, "Hi! ") end)
+        elseif item.kind == "recipe" and crafterPlayer then
+            add(ICON.whisper, "Whisper " .. crafterPlayer, function()
+                GH:Whisper(crafterPlayer, "Hi! Could you craft " .. item.recipe .. " for me? ")
+            end)
         end
     end
     return acts
 end
 
--- A small pick-one menu at the cursor. choices = { { label = "Raid", value = "raid" }, ... }
-local choiceMenu
+-- Opening an event from a shared chat message (/gh #CODE)
+function GH:OpenEvent(id)
+    if not self.db.events[id] then return end
+    page = "events"
+    filters.kind, filters.date, filters.role = "any", "all", "any"
+    frame:Show()
+    frame.search:SetText(self.db.events[id].title)
+    GH:RefreshUI()
+end
 
--- With `anchor`, the menu opens under that frame (and is as wide as it); `current` is marked with ">".
-local function showChoice(choices, onPick, anchor, current)
-    if not choiceMenu then
-        local catcher = CreateFrame("Button", nil, UIParent)
-        catcher:SetAllPoints(UIParent)
-        catcher:SetFrameStrata("FULLSCREEN")
-        catcher:Hide()
-        catcher:SetScript("OnClick", function(self) self:Hide(); choiceMenu:Hide() end)
-
-        choiceMenu = CreateFrame("Frame", nil, UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-        choiceMenu:SetFrameStrata("FULLSCREEN_DIALOG")
-        choiceMenu:SetBackdrop({ bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-                                 edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-                                 edgeSize = 12, insets = { left = 3, right = 3, top = 3, bottom = 3 } })
-        choiceMenu:SetBackdropColor(0, 0, 0, 0.95)
-        choiceMenu.catcher = catcher
-        choiceMenu.buttons = {}
-        choiceMenu:SetScript("OnHide", function(self) self.catcher:Hide() end)
-    end
-    local width = anchor and math.max(anchor:GetWidth(), 120) or 120
-    choiceMenu:SetSize(width, #choices * 22 + 12)
-    for i, c in ipairs(choices) do
-        local btn = choiceMenu.buttons[i]
-        if not btn then
-            btn = CreateFrame("Button", nil, choiceMenu)
-            btn:SetHeight(22)
-            btn:SetPoint("TOPLEFT", 6, -6 - (i - 1) * 22)
-            btn:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
-            btn.text = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            btn.text:SetPoint("LEFT", 6, 0)
-            choiceMenu.buttons[i] = btn
-        end
-        btn:SetWidth(width - 12)
-        btn.text:SetText((current ~= nil and c.value == current and "|cffffd100>|r " or "") .. c.label)
-        btn:SetScript("OnClick", function()
-            choiceMenu:Hide()
-            C_Timer.After(0, function() onPick(c.value) end)
-        end)
-        btn:Show()
-    end
-    for i = #choices + 1, #choiceMenu.buttons do choiceMenu.buttons[i]:Hide() end
-    choiceMenu:ClearAllPoints()
-    if anchor then
-        choiceMenu:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+function GH:OpenEventByCode(code)
+    local ev = self:EventByCode(code)
+    if ev then
+        self:OpenEvent(ev.id)
     else
-        local x, y = GetCursorPosition()
-        local scale = UIParent:GetEffectiveScale()
-        choiceMenu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", x / scale, y / scale)
-    end
-    choiceMenu.catcher:Show()
-    choiceMenu:Show()
-end
-
-local function newClicked()
-    if currentView() == "events" then
-        local choices = {}
-        for _, k in ipairs(GH.KINDS) do choices[#choices + 1] = { label = k.label, value = k } end
-        showChoice(choices, function(kind)
-            ask("Event title:", function(title)
-                if title == "" then return end
-                ask("When (your local time)? e.g. sat 20:00, tomorrow 20:00 or 2026-11-04 20:00", function(when)
-                    local hint = kind.defaultCaps and "blank = 1/1/3, the usual 5-man" or "blank = no limits"
-                    ask("Slots tank/healer/dps, e.g. 2/4/14 (0 = no limit; " .. hint .. "):", function(caps)
-                        GH:CreateEvent(title, when ~= "" and when or "TBD",
-                            GH:ParseCaps(caps) or kind.defaultCaps, kind.key)
-                    end)
-                end)
-            end)
-        end)
-    else
-        ask("What do you need crafted?", function(item)
-            if item ~= "" then GH:CreateRequest(item) end
-        end)
+        self:Print("No event with the code #" .. code .. " yet - the host may be offline. Try again after the sync.")
     end
 end
 
-local function newButton(parent, label, width, key, onClick)
-    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    b:SetSize(width, 22)
-    b:SetText(label)
-    b.key = key
-    b:SetScript("OnClick", onClick)
-    return b
-end
+-- The window ------------------------------------------------------------------------------------------------
 
 function GH:InitUI()
     frame = CreateFrame("Frame", "GuildHubFrame", UIParent, "BasicFrameTemplateWithInset")
@@ -574,14 +698,17 @@ function GH:InitUI()
     -- Page tabs along the top, like the spellbook's.
     frame.pageButtons = {}
     for i, p in ipairs(PAGES) do
-        local b = newButton(frame, p.label, 110, p.key, function()
+        local b = GH.NewButton(frame, p.label, 110, p.key, function()
             page = p.key
-            frame.search:SetText("") -- the search box is shared by the Events and Crafters pages
+            frame.search:SetText("") -- the search box is shared by several pages
             GH:RefreshUI()
         end)
         if i == 1 then b:SetPoint("TOPLEFT", 12, -32 - BANNER) else b:SetPoint("LEFT", frame.pageButtons[i - 1], "RIGHT", 4, 0) end
         frame.pageButtons[i] = b
     end
+
+    local settingsBtn = GH.NewButton(frame, "Settings", 90, nil, function() GH:ToggleSettings() end)
+    settingsBtn:SetPoint("TOPRIGHT", -12, -32 - BANNER)
 
     -- Page title with a divider underneath, like the heading on a spellbook page.
     frame.pageTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
@@ -593,18 +720,20 @@ function GH:InitUI()
     divider:SetPoint("TOPLEFT", 24, -102 - BANNER)
     divider:SetPoint("TOPRIGHT", -24, -102 - BANNER)
 
-    -- Sections inside a page (only the Crafting page has them).
+    -- Sections inside a page (Crafting and Guild have them); only the current page's buttons are shown.
     frame.sectionButtons = {}
     for _, p in ipairs(PAGES) do
+        local prev
         for _, s in ipairs(p.sections or {}) do
-            local b = newButton(frame, s.label, 130, s.key, function()
-                section = s.key
+            local b = GH.NewButton(frame, s.label, 130, s.key, function()
+                sections[p.key] = s.key
                 frame.search:SetText("") -- each section starts with an empty search
                 if s.key == "crafters" then crafterPlayer, crafterProf = nil, nil end
                 GH:RefreshUI()
             end)
-            local prev = frame.sectionButtons[#frame.sectionButtons]
+            b.page = p.key
             if prev then b:SetPoint("LEFT", prev, "RIGHT", 4, 0) else b:SetPoint("TOPLEFT", 24, -110 - BANNER) end
+            prev = b
             frame.sectionButtons[#frame.sectionButtons + 1] = b
         end
     end
@@ -617,28 +746,27 @@ function GH:InitUI()
     frame.search:SetScript("OnEscapePressed", frame.search.ClearFocus)
     frame.search:Hide()
 
-    -- Events filters: each button cycles through its options; the search box filters by name.
     frame.searchLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.searchLabel:SetPoint("RIGHT", frame.search, "LEFT", -8, 0)
     frame.searchLabel:SetTextColor(unpack(TEXT))
     frame.searchLabel:SetText("Name:")
+
+    -- Events filters: each button opens a dropdown with its options; the search box filters by name.
     local function kindLabel(v)
-        for _, k in ipairs(GH.KINDS) do if k.key == v then return k.label end end
-        return "All"
+        local k = colorOf(GH.KINDS, v)
+        return k and k.label or "All"
     end
-    local ROLE_LABEL = { any = "Any", tank = "Tank", healer = "Healer", dps = "DPS" }
     frame.filterButtons = {}
-    -- Each filter button opens a dropdown with its options.
     local specs = {
-        { key = "kind", width = 150, list = KIND_CYCLE, label = kindLabel },
-        { key = "date", width = 170, list = DATE_CYCLE, label = function(v) return DATE_LABEL[v] end },
-        { key = "role", width = 190, list = ROLE_CYCLE, label = function(v) return ROLE_LABEL[v] end },
+        { key = "kind", width = 150, list = KIND_LIST, label = kindLabel },
+        { key = "date", width = 170, list = DATE_LIST, label = function(v) return DATE_LABEL[v] end },
+        { key = "role", width = 190, list = ROLE_LIST, label = function(v) return ROLE_LABEL[v] end },
     }
     for i, spec in ipairs(specs) do
-        local b = newButton(frame, spec.key, spec.width, spec.key, function(self)
+        local b = GH.NewButton(frame, spec.key, spec.width, spec.key, function(self)
             local choices = {}
             for _, v in ipairs(spec.list) do choices[#choices + 1] = { label = spec.label(v), value = v } end
-            showChoice(choices, function(v)
+            GH.ShowChoice(choices, function(v)
                 filters[spec.key] = v
                 GH:RefreshUI()
             end, self, filters[spec.key])
@@ -649,19 +777,21 @@ function GH:InitUI()
         frame.filterButtons[spec.key] = b
     end
 
-    -- Requests / Fulfill: a button that cycles through the professions that appear in requests.
-    frame.profButton = newButton(frame, "Profession", 200, nil, function(self)
+    -- Requests / Fulfill: a dropdown of the professions that appear in requests.
+    frame.profButton = GH.NewButton(frame, "Profession", 200, nil, function(self)
         local seen, profs, hasOther = {}, {}, false
         for _, rq in pairs(GH.db.requests) do
-            local p = requestProf(rq)
-            if not p then hasOther = true
-            elseif not seen[p] then seen[p] = true; profs[#profs + 1] = p end
+            if not rq.bank then
+                local p = requestProf(rq)
+                if not p then hasOther = true
+                elseif not seen[p] then seen[p] = true; profs[#profs + 1] = p end
+            end
         end
         table.sort(profs)
         local choices = { { label = "All", value = "any" } }
         for _, p in ipairs(profs) do choices[#choices + 1] = { label = p, value = p } end
         if hasOther then choices[#choices + 1] = { label = "Unknown", value = "other" } end
-        showChoice(choices, function(v)
+        GH.ShowChoice(choices, function(v)
             reqFilter.prof = v
             GH:RefreshUI()
         end, self, reqFilter.prof)
@@ -670,7 +800,7 @@ function GH:InitUI()
     frame.profButton:Hide()
 
     -- Crafters drill-down: a Back button and a "Player > Profession" trail.
-    frame.backBtn = newButton(frame, "< Back", 80, nil, function()
+    frame.backBtn = GH.NewButton(frame, "< Back", 80, nil, function()
         if crafterProf then crafterProf = nil else crafterPlayer = nil end
         frame.search:SetText("")
         GH:RefreshUI()
@@ -687,7 +817,7 @@ function GH:InitUI()
         GH:RefreshUI()
     end)
 
-    frame.newBtn = newButton(frame, "New", 120, nil, newClicked)
+    frame.newBtn = GH.NewButton(frame, "New", 150, nil, newClicked)
     frame.newBtn:SetPoint("TOPRIGHT", -24, -110 - BANNER)
 
     for i = 1, MAX_ROWS do
@@ -698,11 +828,12 @@ function GH:InitUI()
         row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
         row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         row.text:SetPoint("LEFT", 4, 0)
-        row.text:SetPoint("RIGHT", row, "RIGHT", -52, 0) -- leave room for the action buttons
+        row.text:SetPoint("RIGHT", row, "RIGHT", -(ACTIONS_PER_ROW * 22 + 8), 0) -- leave room for the action buttons
         row.text:SetJustifyH("LEFT")
         row.text:SetWordWrap(false)
+        row.text:SetTextColor(unpack(TEXT))
         row.actions = {}
-        for j = 1, 2 do
+        for j = 1, ACTIONS_PER_ROW do
             local b = CreateFrame("Button", nil, row)
             b:SetSize(18, 18)
             b:SetPoint("RIGHT", -4 - (j - 1) * 22, 0)
@@ -719,24 +850,17 @@ function GH:InitUI()
             b:Hide()
             row.actions[j] = b
         end
-        row.text:SetTextColor(unpack(TEXT))
         row:SetScript("OnClick", onRowClick)
         row:SetScript("OnEnter", function(self)
-            local ev = currentView() == "events" and self.id and GH.db.events[self.id]
-            if not ev then return end
-            local roster = GH:RosterByRole(ev)
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:AddLine(ev.title)
-            GameTooltip:AddLine(GH:WhenText(ev) .. (ev.start and (" " .. date("%Z", ev.start)) or ""), 1, 1, 1)
-            if ev.start then GameTooltip:AddLine("Shown in your local time", 0.6, 0.6, 0.6) end
-            for _, r in ipairs(GH.ROLES) do
-                local names = roster[r.key]
-                local cap = GH:CapOf(ev, r.key)
-                GameTooltip:AddLine(string.format("|c%s%s (%d%s)|r: %s", r.color, r.label, #names,
-                    cap > 0 and ("/" .. cap) or "",
-                    #names > 0 and table.concat(names, ", ") or "-"), 1, 1, 1, true)
+            local view, item = currentView(), self.item
+            if not item then return end
+            if view == "events" then
+                eventTooltip(self, item)
+            elseif item.itemID and (view == "requests" or view == "fulfill" or view == "bank" or view == "crafters") then
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetHyperlink("item:" .. item.itemID)
+                GameTooltip:Show()
             end
-            GameTooltip:Show()
         end)
         row:SetScript("OnLeave", GameTooltip_Hide)
         rows[i] = row
@@ -747,8 +871,16 @@ function GH:InitUI()
     frame.empty:SetTextColor(0.4, 0.3, 0.2)
 
     frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    frame.hint:SetPoint("BOTTOM", 0, 10)
+    frame.hint:SetPoint("BOTTOM", 0, 26)
+    frame.hint:SetWidth(FRAME_W - 80)
     frame.hint:SetTextColor(unpack(TEXT))
+
+    -- Version, read from the "## Version" line of GuildHub.toc, below the hint text.
+    local getMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+    frame.version = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    frame.version:SetPoint("BOTTOM", 0, 10)
+    frame.version:SetTextColor(unpack(TEXT))
+    frame.version:SetText("Version " .. ((getMeta and getMeta("GuildHub", "Version")) or "?"))
 end
 
 function GH:ToggleUI()

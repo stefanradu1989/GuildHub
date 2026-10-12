@@ -56,5 +56,6 @@ GH:Handle("SYNCREQ", function()
         for _, ev in pairs(GH.db.events) do GH:BroadcastEvent(ev) end
         for _, rq in pairs(GH.db.requests) do GH:BroadcastRequest(rq) end
         GH:BroadcastAllRecipes()
+        GH:BroadcastBoard()
     end)
 end)
