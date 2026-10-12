@@ -14,16 +14,18 @@ function GH:RequestRoster()
 end
 
 function GH:UpdateRoster()
-    local set, count = {}, 0
+    local set, full, count = {}, {}, 0
     local total = GetNumGuildMembers and GetNumGuildMembers() or 0
     for i = 1, total do
         local name = GetGuildRosterInfo(i)
         if name then
-            set[Ambiguate(name, "short")] = true
+            local short = Ambiguate(name, "short")
+            set[short] = true
+            full[short] = name -- the roster's full name (with the realm), which is what a whisper needs
             count = count + 1
         end
     end
-    if count > 0 then self.guildMembers, self.rosterLoaded = set, true end
+    if count > 0 then self.guildMembers, self.fullNames, self.rosterLoaded = set, full, true end
 end
 
 -- True if `name` is in the guild. Until the roster has loaded we can't tell, so everyone counts as a member.
@@ -53,9 +55,21 @@ function GH:PruneMembers()
     if removed then self.recipesVersion = (self.recipesVersion or 0) + 1 end
 end
 
--- Opens the chat box with a prefilled whisper. The player reviews it and presses Enter.
+-- Opens the chat box set to whisper `name`, with `text` prefilled. The player reviews it and presses Enter.
+-- The whisper target is set directly instead of typing "/w name text", so names that contain a space or a
+-- realm ("Name-Realm") aren't cut apart; the full name comes from the guild roster when we have it.
 function GH:Whisper(name, text)
-    ChatFrame_OpenChat("/w " .. name .. " " .. (text or ""))
+    local target = (self.fullNames and self.fullNames[name]) or name
+    local box = ChatEdit_ChooseBoxForSend and ChatEdit_ChooseBoxForSend()
+    if box and ChatEdit_ActivateChat then
+        box:SetAttribute("chatType", "WHISPER")
+        box:SetAttribute("tellTarget", target)
+        if ChatEdit_UpdateHeader then ChatEdit_UpdateHeader(box) end
+        ChatEdit_ActivateChat(box)
+        box:SetText(text or "")
+    else
+        ChatFrame_OpenChat("/w " .. target:gsub("%s", "") .. " " .. (text or ""))
+    end
 end
 
 -- Opens the chat box with a prefilled guild message.

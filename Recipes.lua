@@ -60,6 +60,9 @@ function GH:BroadcastAllRecipes()
     for player, profs in pairs(self.db.recipes) do
         for prof, entry in pairs(profs) do self:BroadcastRecipes(player, prof, entry) end
     end
+    for player, profs in pairs(self.db.recipeGone) do
+        for prof, ts in pairs(profs) do self:Send("RECDEL", player, prof, ts) end
+    end
 end
 
 local function itemIdFromLink(link)
@@ -198,6 +201,8 @@ GH:Handle("REC", function(sender, player, prof, ts, seq, total, payload)
     ts, seq, total = tonumber(ts), tonumber(seq), tonumber(total)
     if not (player and prof and ts and seq and total) then return end
     if GH:IsIgnoredProfession(prof) then return end -- e.g. sent by someone on an older version
+    local goneTs = GH.db.recipeGone[player] and GH.db.recipeGone[player][prof]
+    if goneTs and ts <= goneTs then return end -- they dropped this profession after this copy was made
     local existing = GH.db.recipes[player] and GH.db.recipes[player][prof]
     if existing and existing.ts >= ts then return end -- already have this or newer
 
@@ -232,6 +237,107 @@ GH:Handle("REC", function(sender, player, prof, ts, seq, total, payload)
     GH.recipesVersion = (GH.recipesVersion or 0) + 1
     GH:RefreshUI()
 end)
+
+-- Dropped professions -----------------------------------------------------------------------------------------
+
+-- The skills the character has right now, as a set of lowercase names; nil if the game can't tell yet.
+-- (On the classic skill list this also includes weapon skills and languages, which is harmless: we only
+-- ask whether a saved profession is in the set.)
+local function currentProfessions()
+    local set, any = {}, false
+    if GetProfessions and GetProfessionInfo then
+        for _, index in pairs({ GetProfessions() }) do
+            local name = GetProfessionInfo(index)
+            if name then set[name:lower()] = true; any = true end
+        end
+    end
+    if GetNumSkillLines and GetSkillLineInfo then
+        -- Skills under a collapsed header aren't listed, so open every header, read, then close them again.
+        local opened = {}
+        if ExpandSkillHeader then
+            for i = GetNumSkillLines(), 1, -1 do
+                local name, header, expanded = GetSkillLineInfo(i)
+                if header and not expanded then
+                    ExpandSkillHeader(i)
+                    opened[name] = true
+                end
+            end
+        end
+        for i = 1, GetNumSkillLines() do
+            local name, header = GetSkillLineInfo(i)
+            if name and not header then set[name:lower()] = true; any = true end
+        end
+        if next(opened) and CollapseSkillHeader then
+            for i = GetNumSkillLines(), 1, -1 do
+                local name, header = GetSkillLineInfo(i)
+                if header and opened[name] then CollapseSkillHeader(i) end
+            end
+        end
+    end
+    return any and set or nil
+end
+
+-- Removes saved professions the character no longer has, and tells the guild.
+-- db.recipeGone[player][profession] = time of removal, so an old copy of the recipes can't bring it back.
+function GH:SyncProfessions()
+    local ok, current = pcall(currentProfessions)
+    if not ok or not current then return end
+    local mine = self.db.recipes[self.me]
+    if not mine then return end
+    local gone = self.db.recipeGone
+    gone[self.me] = gone[self.me] or {}
+    local removed = false
+    for prof in pairs(mine) do
+        if not current[prof:lower()] then
+            local ts = time()
+            mine[prof] = nil
+            gone[self.me][prof] = ts
+            removed = true
+            self:Send("RECDEL", self.me, prof, ts)
+            self:Print("You no longer have " .. prof .. ", so it was removed from the Crafters list.")
+        end
+    end
+    if removed then
+        self.recipesVersion = (self.recipesVersion or 0) + 1
+        self:RefreshUI()
+    end
+end
+
+GH:Handle("RECDEL", function(sender, player, prof, ts)
+    ts = tonumber(ts)
+    if not (player and prof and ts) then return end
+    local gone = GH.db.recipeGone
+    gone[player] = gone[player] or {}
+    if ts > (gone[player][prof] or 0) then gone[player][prof] = ts end
+    local existing = GH.db.recipes[player] and GH.db.recipes[player][prof]
+    if existing and existing.ts <= ts then
+        GH.db.recipes[player][prof] = nil
+        GH.recipesVersion = (GH.recipesVersion or 0) + 1
+        GH:RefreshUI()
+    end
+end)
+
+-- Checks shortly after login, and again whenever the character's skills change.
+-- Opening and closing the skill headers fires the same event, so events during a check are ignored.
+function GH:StartProfessionSync()
+    local busy, pendingCheck = false, false
+    local function check()
+        busy = true
+        GH:SyncProfessions()
+        C_Timer.After(2, function() busy = false end)
+    end
+    C_Timer.After(10, check)
+    local f = CreateFrame("Frame")
+    pcall(f.RegisterEvent, f, "SKILL_LINES_CHANGED")
+    f:SetScript("OnEvent", function()
+        if busy or pendingCheck then return end
+        pendingCheck = true
+        C_Timer.After(3, function()
+            pendingCheck = false
+            check()
+        end)
+    end)
+end
 
 local pending
 local scanFrame = CreateFrame("Frame")

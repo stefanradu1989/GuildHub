@@ -528,6 +528,12 @@ function GH:Cleanup()
     for id, a in pairs(self.db.board) do
         if (a.ts or 0) < now - 30 * 86400 then self.db.board[id] = nil end
     end
+    for player, profs in pairs(self.db.recipeGone) do -- old "dropped profession" records
+        for prof, ts in pairs(profs) do
+            if ts < time() - 90 * 86400 then profs[prof] = nil end
+        end
+        if next(profs) == nil then self.db.recipeGone[player] = nil end
+    end
 end
 
 function GH:StartTimers()

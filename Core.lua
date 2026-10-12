@@ -54,6 +54,7 @@ local DEFAULTS = {
     requests = {},
     recipes = {},
     board = {},
+    recipeGone = {}, -- professions people have dropped: recipeGone[player][profession] = time
     stats = { fulfilled = {}, requested = {} },
     settings = {
         notify_events = true,
@@ -136,6 +137,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         GH:ScheduleReminders()
         GH:StartTimers()
         GH:RequestRoster()
+        GH:StartProfessionSync()
         C_Timer.After(25, function() GH.quiet = false end)
         GH:Print("loaded. Type /gh to open, or use the minimap button.")
     end

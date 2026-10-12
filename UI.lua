@@ -12,6 +12,9 @@ local PARCHMENT_ATLAS = "QuestBG-Parchment"
 local PARCHMENT = "Interface\\QuestFrame\\QuestBG" -- fallback if the atlas is missing
 local PARCHMENT_COORDS = { 0, 1, 0, 1 }
 local TEXT = { 0.2, 0.1, 0.0 } -- dark brown, readable on parchment
+local TINT = { 0.30, 0.62, 0.70 } -- teal gradient over the bottom of the parchment
+local TINT_ALPHA = 0.65           -- strength at the very bottom (0 = invisible, 1 = solid)
+local TINT_HEIGHT = 0.55          -- how far up the page it reaches (fraction of the page height)
 
 -- Spellbook-style layout: tabs along the top pick a page, the page has a title, and a page can have sections.
 local PAGES = {
@@ -681,6 +684,19 @@ function GH:InitUI()
     end
     bg:SetPoint("TOPLEFT", 6, -58 - BANNER)
     bg:SetPoint("BOTTOMRIGHT", -6, 6)
+
+    -- Teal gradient rising from the bottom of the parchment, like the Forever quest windows.
+    local tint = frame:CreateTexture(nil, "BACKGROUND", nil, 3)
+    tint:SetColorTexture(1, 1, 1, 1)
+    tint:SetPoint("BOTTOMLEFT", 6, 6)
+    tint:SetPoint("BOTTOMRIGHT", -6, 6)
+    tint:SetHeight((FRAME_H - 64 - BANNER) * TINT_HEIGHT)
+    if tint.SetGradient and CreateColor then
+        tint:SetGradient("VERTICAL", CreateColor(TINT[1], TINT[2], TINT[3], TINT_ALPHA),
+            CreateColor(TINT[1], TINT[2], TINT[3], 0))
+    else
+        tint:SetGradientAlpha("VERTICAL", TINT[1], TINT[2], TINT[3], TINT_ALPHA, TINT[1], TINT[2], TINT[3], 0)
+    end
 
     frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.title:SetPoint("TOP", 0, -5)
