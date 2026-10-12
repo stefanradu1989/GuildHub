@@ -127,21 +127,35 @@ local function capsString(ev)
 end
 
 function GH:BroadcastEvent(ev)
-    self:Send("EV", ev.id, ev.title, ev.when, ev.host, ev.ts, capsString(ev), ev.capsRev or 0, ev.start or "")
+    self:Send("EV", ev.id, ev.title, ev.when, ev.host, ev.ts, capsString(ev), ev.capsRev or 0, ev.start or "",
+        ev.kind or "")
     for name, v in pairs(ev.rsvps) do
         local r = roleOf(v)
         if r then self:Send("RSVP", ev.id, name, r) end
     end
 end
 
-function GH:CreateEvent(title, when, caps)
+-- Event types. Events made before types existed have no kind.
+GH.KINDS = {
+    { key = "raid", label = "Raid", color = "ff8a3b00", defaultCaps = nil },
+    { key = "dungeon", label = "Dungeon", color = "ff2a6a8a", defaultCaps = { tank = 1, healer = 1, dps = 3 } },
+    { key = "battleground", label = "Battleground", color = "ff8a1a3a", defaultCaps = nil },
+}
+
+local function validKind(key)
+    for _, k in ipairs(GH.KINDS) do
+        if k.key == key then return key end
+    end
+end
+
+function GH:CreateEvent(title, when, caps, kind)
     local start = self:ParseWhen(when)
     if not start then
         self:Print("Couldn't read that time, so there will be no reminder for this event. " ..
             "Use e.g. 2026-11-04 20:00, sat 20:00 or tomorrow 20:00.")
     end
     local ev = { id = self:NewId(), title = title, when = when, host = self.me,
-                 ts = time(), rsvps = {}, caps = caps, start = start }
+                 ts = time(), rsvps = {}, caps = caps, start = start, kind = kind }
     self.db.events[ev.id] = ev
     self:BroadcastEvent(ev)
     self:RefreshUI()
@@ -186,13 +200,14 @@ function GH:DeleteEvent(id)
     end
 end
 
-GH:Handle("EV", function(sender, id, title, when, host, ts, caps, rev, start)
+GH:Handle("EV", function(sender, id, title, when, host, ts, caps, rev, start, kind)
     rev = tonumber(rev) or 0
     local ev = GH.db.events[id]
     if not ev then
         GH.db.events[id] = { id = id, title = title, when = when, host = host,
                              ts = tonumber(ts) or time(), rsvps = {},
-                             caps = GH:ParseCaps(caps), capsRev = rev, start = tonumber(start) }
+                             caps = GH:ParseCaps(caps), capsRev = rev, start = tonumber(start),
+                             kind = validKind(kind) }
         GH:RefreshUI()
     elseif rev > (ev.capsRev or 0) then
         -- A relayed copy with newer caps (we missed the host's edit).

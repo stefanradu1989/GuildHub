@@ -27,6 +27,13 @@ local crafterPlayer, crafterProf -- drill-down position in the Crafters section
 local offset, lastKey = 0, nil   -- list scroll position, reset whenever the list changes
 local actionsFor                 -- defined below; RefreshUI needs it first
 
+-- Filters on the Events page (kept for the session). The name filter is the search box.
+local filters = { kind = "any", date = "upcoming", role = "any" }
+local KIND_CYCLE = { "any", "raid", "dungeon", "battleground" }
+local DATE_CYCLE = { "upcoming", "today", "week", "past", "all" }
+local ROLE_CYCLE = { "any", "tank", "healer", "dps" }
+local DATE_LABEL = { upcoming = "Upcoming", today = "Today", week = "Next 7 days", past = "Past", all = "All" }
+
 -- The list currently shown: "events", "requests", "fulfill" or "crafters".
 local function currentView()
     return page == "events" and "events" or section
@@ -84,13 +91,17 @@ local function eventText(ev)
     end
     local counts = table.concat(parts, " ")
     local mine = GH:RoleOf(ev, GH.me)
+    local kindTag = ""
+    for _, k in ipairs(GH.KINDS) do
+        if k.key == ev.kind then kindTag = string.format("|c%s[%s]|r ", k.color, k.label) end
+    end
     local mark = ""
     if mine then
         for _, r in ipairs(GH.ROLES) do
             if r.key == mine then mark = string.format("|c%s[%s]|r ", r.color, r.label) end
         end
     end
-    return string.format("%s%s - %s (host %s)  T/H/D %s", mark, ev.title, GH:WhenText(ev), ev.host, counts)
+    return string.format("%s%s%s - %s (host %s)  T/H/D %s", mark, kindTag, ev.title, GH:WhenText(ev), ev.host, counts)
 end
 
 local function requestText(rq)
@@ -157,8 +168,33 @@ end
 local function viewItems(view)
     local list = {}
     if view == "events" then
-        for _, ev in pairs(GH.db.events) do list[#list + 1] = ev end
-        return sorted(list)
+        local now = time()
+        local query = frame.search:GetText():lower()
+        for _, ev in pairs(GH.db.events) do
+            local s, d = ev.start, filters.date
+            local ok = (filters.kind == "any" or ev.kind == filters.kind)
+                and (query == "" or ev.title:lower():find(query, 1, true) ~= nil)
+                and (filters.role == "any" or not GH:IsFull(ev, filters.role)) -- "free tank spot" etc.
+            if ok then
+                -- events with no parsed time count as upcoming; they never match Today / Next 7 days / Past
+                if d == "upcoming" then ok = s == nil or s >= now - 7200
+                elseif d == "today" then ok = s ~= nil and date("%Y%m%d", s) == date("%Y%m%d", now)
+                elseif d == "week" then ok = s ~= nil and s >= now - 7200 and s <= now + 7 * 86400
+                elseif d == "past" then ok = s ~= nil and s < now - 7200 end
+            end
+            if ok then list[#list + 1] = ev end
+        end
+        -- soonest first (latest first for Past); events without a time go last
+        table.sort(list, function(a, b)
+            local as, bs = a.start, b.start
+            if as and bs and as ~= bs then
+                if filters.date == "past" then return as > bs end
+                return as < bs
+            end
+            if (as ~= nil) ~= (bs ~= nil) then return as ~= nil end
+            return (a.ts or 0) > (b.ts or 0)
+        end)
+        return list
     elseif view == "requests" then -- requests I posted
         for _, rq in pairs(GH.db.requests) do
             if rq.requester == GH.me then list[#list + 1] = rq end
@@ -177,6 +213,7 @@ end
 
 local EMPTY = {
     events = "No events yet. Click New Event to create one.",
+    events_filtered = "No events match your filters.",
     requests = "You haven't posted any requests. Click New Request, or pick a recipe under Crafters.",
     fulfill = "No open requests from your guildmates right now.",
     crafters_players = "Nobody has shared their professions yet. Open your profession windows to share yours.",
@@ -186,7 +223,7 @@ local EMPTY = {
 }
 
 local HINTS = {
-    events = "Click an event to sign up. The host also gets edit and delete buttons.",
+    events = "Click an event to sign up. Use the buttons above to filter by type, date or a free role slot; the host also gets edit and delete buttons.",
     requests = "Use the buttons on the right to mark a request as received or delete it.",
     fulfill = "Use the + button to take a request; once it's yours you can mark it crafted or give it back.",
     crafters_players = "Click a player to see their professions, or type to search for a recipe.",
@@ -210,7 +247,13 @@ function GH:RefreshUI()
     end
     local level = view == "crafters" and crafterLevel() or nil
     local key = level and ("crafters_" .. level) or view
-    frame.search:SetShown(view == "crafters" and level ~= "professions")
+    frame.search:SetShown(view == "events" or (view == "crafters" and level ~= "professions"))
+    frame.searchLabel:SetShown(view == "events")
+    for _, b in pairs(frame.filterButtons) do b:SetShown(view == "events") end
+    frame.filterButtons.kind:SetText("Type: " .. (filters.kind == "any" and "All" or filters.kind:gsub("^%l", string.upper)))
+    frame.filterButtons.date:SetText("Date: " .. DATE_LABEL[filters.date])
+    frame.filterButtons.role:SetText("Free slot: " .. (filters.role == "any" and "Any" or
+        (filters.role == "dps" and "DPS" or filters.role:gsub("^%l", string.upper))))
     frame.backBtn:SetShown(view == "crafters" and crafterPlayer ~= nil)
     frame.crumb:SetShown(view == "crafters" and crafterPlayer ~= nil)
     frame.crumb:SetText(crafterPlayer and (crafterPlayer .. (crafterProf and (" > " .. crafterProf) or "")) or "")
@@ -218,7 +261,8 @@ function GH:RefreshUI()
     frame.newBtn:SetText(view == "events" and "New Event" or "New Request")
 
     local list = viewItems(view)
-    local pos = key .. "|" .. tostring(crafterPlayer) .. "|" .. tostring(crafterProf) .. "|" .. page
+    local pos = table.concat({ key, tostring(crafterPlayer), tostring(crafterProf), page,
+        filters.kind, filters.date, filters.role, frame.search:GetText() }, "|")
     if pos ~= lastKey then offset, lastKey = 0, pos end -- new list: scroll back to the top
     offset = math.max(0, math.min(offset, #list - MAX_ROWS))
     frame.count = #list
@@ -245,7 +289,7 @@ function GH:RefreshUI()
             row:Hide()
         end
     end
-    frame.empty:SetText(EMPTY[key])
+    frame.empty:SetText(EMPTY[(view == "events" and next(GH.db.events)) and "events_filtered" or key])
     frame.empty:SetShown(#list == 0)
     frame.hint:SetText(HINTS[key] .. (#list > MAX_ROWS and "   (scroll for more)" or ""))
 end
@@ -372,13 +416,68 @@ function actionsFor(view, item)
     return acts
 end
 
+-- A small pick-one menu at the cursor. choices = { { label = "Raid", value = "raid" }, ... }
+local choiceMenu
+
+local function showChoice(choices, onPick)
+    if not choiceMenu then
+        local catcher = CreateFrame("Button", nil, UIParent)
+        catcher:SetAllPoints(UIParent)
+        catcher:SetFrameStrata("FULLSCREEN")
+        catcher:Hide()
+        catcher:SetScript("OnClick", function(self) self:Hide(); choiceMenu:Hide() end)
+
+        choiceMenu = CreateFrame("Frame", nil, UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+        choiceMenu:SetFrameStrata("FULLSCREEN_DIALOG")
+        choiceMenu:SetBackdrop({ bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+                                 edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+                                 edgeSize = 12, insets = { left = 3, right = 3, top = 3, bottom = 3 } })
+        choiceMenu:SetBackdropColor(0, 0, 0, 0.95)
+        choiceMenu.catcher = catcher
+        choiceMenu.buttons = {}
+        choiceMenu:SetScript("OnHide", function(self) self.catcher:Hide() end)
+    end
+    choiceMenu:SetSize(120, #choices * 22 + 12)
+    for i, c in ipairs(choices) do
+        local btn = choiceMenu.buttons[i]
+        if not btn then
+            btn = CreateFrame("Button", nil, choiceMenu)
+            btn:SetSize(108, 22)
+            btn:SetPoint("TOPLEFT", 6, -6 - (i - 1) * 22)
+            btn:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+            btn.text = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            btn.text:SetPoint("LEFT", 6, 0)
+            choiceMenu.buttons[i] = btn
+        end
+        btn.text:SetText(c.label)
+        btn:SetScript("OnClick", function()
+            choiceMenu:Hide()
+            C_Timer.After(0, function() onPick(c.value) end)
+        end)
+        btn:Show()
+    end
+    for i = #choices + 1, #choiceMenu.buttons do choiceMenu.buttons[i]:Hide() end
+    local x, y = GetCursorPosition()
+    local scale = UIParent:GetEffectiveScale()
+    choiceMenu:ClearAllPoints()
+    choiceMenu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", x / scale, y / scale)
+    choiceMenu.catcher:Show()
+    choiceMenu:Show()
+end
+
 local function newClicked()
     if currentView() == "events" then
-        ask("Event title:", function(title)
-            if title == "" then return end
-            ask("When (your local time)? e.g. sat 20:00, tomorrow 20:00 or 2026-11-04 20:00", function(when)
-                ask("Slots tank/healer/dps, e.g. 2/4/14 (0 = no limit, blank = none):", function(caps)
-                    GH:CreateEvent(title, when ~= "" and when or "TBD", GH:ParseCaps(caps))
+        local choices = {}
+        for _, k in ipairs(GH.KINDS) do choices[#choices + 1] = { label = k.label, value = k } end
+        showChoice(choices, function(kind)
+            ask("Event title:", function(title)
+                if title == "" then return end
+                ask("When (your local time)? e.g. sat 20:00, tomorrow 20:00 or 2026-11-04 20:00", function(when)
+                    local hint = kind.defaultCaps and "blank = 1/1/3, the usual 5-man" or "blank = no limits"
+                    ask("Slots tank/healer/dps, e.g. 2/4/14 (0 = no limit; " .. hint .. "):", function(caps)
+                        GH:CreateEvent(title, when ~= "" and when or "TBD",
+                            GH:ParseCaps(caps) or kind.defaultCaps, kind.key)
+                    end)
                 end)
             end)
         end)
@@ -441,6 +540,7 @@ function GH:InitUI()
     for i, p in ipairs(PAGES) do
         local b = newButton(frame, p.label, 110, p.key, function()
             page = p.key
+            frame.search:SetText("") -- the search box is shared by the Events and Crafters pages
             GH:RefreshUI()
         end)
         if i == 1 then b:SetPoint("TOPLEFT", 12, -32 - BANNER) else b:SetPoint("LEFT", frame.pageButtons[i - 1], "RIGHT", 4, 0) end
@@ -479,6 +579,34 @@ function GH:InitUI()
     frame.search:SetScript("OnTextChanged", function() GH:RefreshUI() end)
     frame.search:SetScript("OnEscapePressed", frame.search.ClearFocus)
     frame.search:Hide()
+
+    -- Events filters: each button cycles through its options; the search box filters by name.
+    frame.searchLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.searchLabel:SetPoint("RIGHT", frame.search, "LEFT", -8, 0)
+    frame.searchLabel:SetTextColor(unpack(TEXT))
+    frame.searchLabel:SetText("Name:")
+    local function cycleOf(list, value)
+        for i, v in ipairs(list) do
+            if v == value then return list[i % #list + 1] end
+        end
+        return list[1]
+    end
+    frame.filterButtons = {}
+    local specs = {
+        { key = "kind", width = 130, list = KIND_CYCLE },
+        { key = "date", width = 170, list = DATE_CYCLE },
+        { key = "role", width = 170, list = ROLE_CYCLE },
+    }
+    for i, spec in ipairs(specs) do
+        local b = newButton(frame, spec.key, spec.width, spec.key, function()
+            filters[spec.key] = cycleOf(spec.list, filters[spec.key])
+            GH:RefreshUI()
+        end)
+        local prev = specs[i - 1] and frame.filterButtons[specs[i - 1].key]
+        if prev then b:SetPoint("LEFT", prev, "RIGHT", 4, 0) else b:SetPoint("TOPLEFT", 24, -110 - BANNER) end
+        b:Hide()
+        frame.filterButtons[spec.key] = b
+    end
 
     -- Crafters drill-down: a Back button and a "Player > Profession" trail.
     frame.backBtn = newButton(frame, "< Back", 80, nil, function()
