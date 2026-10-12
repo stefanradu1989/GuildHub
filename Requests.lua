@@ -1,7 +1,7 @@
 local _, GH = ...
 
 function GH:BroadcastRequest(rq)
-    self:Send("RQ", rq.id, rq.item, rq.requester, rq.ts)
+    self:Send("RQ", rq.id, rq.item, rq.requester, rq.ts, rq.prof or "")
     if rq.claimedBy then
         self:Send("CLAIM", rq.id, rq.claimedBy, rq.claimRev or 1)
     elseif rq.claimRev then
@@ -10,8 +10,11 @@ function GH:BroadcastRequest(rq)
     if rq.done then self:Send("DONE", rq.id) end
 end
 
-function GH:CreateRequest(item)
-    local rq = { id = self:NewId(), item = item, requester = self.me, ts = time() }
+-- prof is the recipe's profession when known (e.g. picked from the Crafters list); otherwise it's looked up
+-- in the shared recipe directory, and stays nil if nobody has shared that recipe.
+function GH:CreateRequest(item, prof)
+    prof = prof or self:ProfessionOf(item)
+    local rq = { id = self:NewId(), item = item, requester = self.me, ts = time(), prof = prof }
     self.db.requests[rq.id] = rq
     self:BroadcastRequest(rq)
     self:RefreshUI()
@@ -55,9 +58,10 @@ function GH:DeleteRequest(id)
     end
 end
 
-GH:Handle("RQ", function(sender, id, item, requester, ts)
+GH:Handle("RQ", function(sender, id, item, requester, ts, prof)
     if not GH.db.requests[id] then
-        GH.db.requests[id] = { id = id, item = item, requester = requester, ts = tonumber(ts) or time() }
+        GH.db.requests[id] = { id = id, item = item, requester = requester, ts = tonumber(ts) or time(),
+                               prof = (prof and prof ~= "") and prof or nil }
         GH:RefreshUI()
     end
 end)

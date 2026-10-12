@@ -66,9 +66,25 @@ function GH:ScanProfession()
     local old = mine[prof]
     if old and table.concat(old.list, ";") == table.concat(names, ";") then return end
     mine[prof] = { ts = time(), list = names }
+    self.recipesVersion = (self.recipesVersion or 0) + 1
     self:BroadcastRecipes(self.me, prof, mine[prof])
     self:Print(string.format("Shared %d %s recipes with the guild.", #names, prof))
     self:RefreshUI()
+end
+
+-- Which profession a recipe belongs to, by exact (case-insensitive) name, from the shared recipe directory.
+-- Returns nil if nobody has shared it. The lookup table is rebuilt only when recipes change.
+function GH:ProfessionOf(item)
+    if self.profIndexVersion ~= (self.recipesVersion or 0) or not self.profIndex then
+        local index = {}
+        for _, profs in pairs(self.db.recipes) do
+            for prof, entry in pairs(profs) do
+                for _, name in ipairs(entry.list) do index[name:lower()] = prof end
+            end
+        end
+        self.profIndex, self.profIndexVersion = index, self.recipesVersion or 0
+    end
+    return self.profIndex[(item or ""):lower()]
 end
 
 -- Returns { {recipe=, prof=, crafters={...}}, ... } for recipes matching query, sorted by name.
@@ -122,6 +138,7 @@ GH:Handle("REC", function(sender, player, prof, ts, seq, total, payload)
     GH.recvBuf[key] = nil
     GH.db.recipes[player] = GH.db.recipes[player] or {}
     GH.db.recipes[player][prof] = { ts = ts, list = list }
+    GH.recipesVersion = (GH.recipesVersion or 0) + 1
     GH:RefreshUI()
 end)
 
